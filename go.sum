@@ -110,6 +110,8 @@ github.com/libp2p/go-buffer-pool v0.0.2 h1:QNK2iAFa8gjAe1SPz6mHSMuCcjs+X1wlHzeOS
 github.com/libp2p/go-buffer-pool v0.0.2/go.mod h1:MvaB6xw5vOrDl8rYZGLFdKAuk/hRoRZd1Vi32+RXyFM=
 github.com/libp2p/go-conn-security-multistream v0.1.0 h1:aqGmto+ttL/uJgX0JtQI0tD21CIEy5eYd1Hlp0juHY0=
 github.com/libp2p/go-conn-security-multistream v0.1.0/go.mod h1:aw6eD7LOsHEX7+2hJkDxw1MteijaVcI+/eP2/x3J1xc=
+github.com/libp2p/go-conn-security-multistream v0.1.1-0.20190826113050-e3a2c9667f78 h1:45wes/q/abLZE/ETaR+wshj6s9WRmQFv0HYsuk/rk3w=
+github.com/libp2p/go-conn-security-multistream v0.1.1-0.20190826113050-e3a2c9667f78/go.mod h1:+m5sYlVGxxVuN8BDjEkg/1R8m1pjxy+yduCRCTF6s2c=
 github.com/libp2p/go-eventbus v0.0.2 h1:L9eslON8FjFBJlyUs9fyEZKnxSqZd2AMDUNldPrqmZI=
 github.com/libp2p/go-eventbus v0.0.2/go.mod h1:Hr/yGlwxA/stuLnpMiu82lpNKpvRy3EaJxPu40XYOwk=
 github.com/libp2p/go-eventbus v0.1.0 h1:mlawomSAjjkk97QnYiEmHsLu7E136+2oCWSHRUvMfzQ=
@@ -135,6 +137,8 @@ github.com/libp2p/go-libp2p-core v0.2.0 h1:ycFtuNwtZBAJSxzaHbyv6NjG3Yj5Nmra1csHa
 github.com/libp2p/go-libp2p-core v0.2.0/go.mod h1:X0eyB0Gy93v0DZtSYbEM7RnMChm9Uv3j7yRXjO77xSI=
 github.com/libp2p/go-libp2p-core v0.2.2 h1:Sv1ggdoMx9c7v7FOFkR7agraHCnAgqYsXrU1ARSRUMs=
 github.com/libp2p/go-libp2p-core v0.2.2/go.mod h1:8fcwTbsG2B+lTgRJ1ICZtiM5GWCWZVoVrLaDRvIRng0=
+github.com/libp2p/go-libp2p-core v0.2.3-0.20190826112323-405451631c05 h1:/xYjENBcQ6rDv6rdr8Jk0J7Q/SH+rgUTGkMbWOzfVoc=
+github.com/libp2p/go-libp2p-core v0.2.3-0.20190826112323-405451631c05/go.mod h1:1Muyk4HEeyPytWH5XRiczNC1ghbTq70PNn0uEbcLCxY=
 github.com/libp2p/go-libp2p-crypto v0.1.0/go.mod h1:sPUokVISZiy+nNuTTH/TY+leRSxnFj/2GLjtOTW90hI=
 github.com/libp2p/go-libp2p-discovery v0.1.0 h1:j+R6cokKcGbnZLf4kcNwpx6mDEUPF3N6SrqMymQhmvs=
 github.com/libp2p/go-libp2p-discovery v0.1.0/go.mod h1:4F/x+aldVHjHDHuX85x1zWoFTGElt8HnoDzwkFZm29g=
@@ -166,6 +170,8 @@ github.com/libp2p/go-libp2p-testing v0.1.0 h1:WaFRj/t3HdMZGNZqnU2pS7pDRBmMeoDx7/
 github.com/libp2p/go-libp2p-testing v0.1.0/go.mod h1:xaZWMJrPUM5GlDBxCeGUi7kI4eqnjVyavGroI2nxEM0=
 github.com/libp2p/go-libp2p-transport-upgrader v0.1.1 h1:PZMS9lhjK9VytzMCW3tWHAXtKXmlURSc3ZdvwEcKCzw=
 github.com/libp2p/go-libp2p-transport-upgrader v0.1.1/go.mod h1:IEtA6or8JUbsV07qPW4r01GnTenLW4oi3lOPbUMGJJA=
+github.com/libp2p/go-libp2p-transport-upgrader v0.1.2-0.20190826113403-e6aa0ae488d6 h1:mwZ4cJBSF7ex3uqct/TgeYesR0lZL+b2/Oh/HotHumI=
+github.com/libp2p/go-libp2p-transport-upgrader v0.1.2-0.20190826113403-e6aa0ae488d6/go.mod h1:FsB1CANm+J83duEj0Cb/1E33ISSxd16C/FnSC99kHbY=
 github.com/libp2p/go-libp2p-yamux v0.2.0/go.mod h1:Db2gU+XfLpm6E4rG5uGCFX6uXA8MEXOxFcRoXUODaK8=
 github.com/libp2p/go-libp2p-yamux v0.2.1 h1:Q3XYNiKCC2vIxrvUJL+Jg1kiyeEaIDNKLjgEjo3VQdI=
 github.com/libp2p/go-libp2p-yamux v0.2.1/go.mod h1:1FBXiHDk1VyRM1C0aez2bCfHQ4vMZKkAQzZbkSQt5fI=
@@ -256,6 +262,8 @@ github.com/multiformats/go-multihash v0.0.8 h1:wrYcW5yxSi3dU07n5jnuS5PrNwyHy0zRH
 github.com/multiformats/go-multihash v0.0.8/go.mod h1:YSLudS+Pi8NHE7o6tb3D8vrpKa63epEDmG8nTduyAew=
 github.com/multiformats/go-multistream v0.1.0 h1:UpO6jrsjqs46mqAK3n6wKRYFhugss9ArzbyUzU+4wkQ=
 github.com/multiformats/go-multistream v0.1.0/go.mod h1:fJTiDfXJVmItycydCnNx4+wSzZ5NwG2FEVAI30fiovg=
+github.com/multiformats/go-multistream v0.1.1-0.20190826111404-2bc18275ac63 h1:UaxYbe89axJ8x7hzUP5s3ED6bTFzBIrrQZzrXS34Uh4=
+github.com/multiformats/go-multistream v0.1.1-0.20190826111404-2bc18275ac63/go.mod h1:fJTiDfXJVmItycydCnNx4+wSzZ5NwG2FEVAI30fiovg=
 github.com/onsi/ginkgo v1.6.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/ginkgo v1.7.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/ginkgo v1.8.0 h1:VkHVNpR4iVnU8XQR6DBm8BqYjN7CRzw+xKUbVVbbW9w=
