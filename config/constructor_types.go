@@ -15,7 +15,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/transport"
 
 	tptu "github.com/libp2p/go-libp2p-transport-upgrader"
-	filter "github.com/libp2p/go-maddr-filter"
 )
 
 var (
@@ -31,7 +30,6 @@ var (
 
 	// concrete types
 	peerIDType   = reflect.TypeOf((peer.ID)(""))
-	filtersType  = reflect.TypeOf((*filter.Filters)(nil))
 	upgraderType = reflect.TypeOf((*tptu.Upgrader)(nil))
 	pskType      = reflect.TypeOf((pnet.PSK)(nil))
 )
@@ -43,7 +41,6 @@ var argTypes = map[reflect.Type]constructor{
 	muxType:      func(h host.Host, u *tptu.Upgrader) interface{} { return u.Muxer },
 	securityType: func(h host.Host, u *tptu.Upgrader) interface{} { return u.Secure },
 	pskType:      func(h host.Host, u *tptu.Upgrader) interface{} { return u.PSK },
-	filtersType:  func(h host.Host, u *tptu.Upgrader) interface{} { return u.Filters },
 	peerIDType:   func(h host.Host, u *tptu.Upgrader) interface{} { return h.ID() },
 	privKeyType:  func(h host.Host, u *tptu.Upgrader) interface{} { return h.Peerstore().PrivKey(h.ID()) },
 	pubKeyType:   func(h host.Host, u *tptu.Upgrader) interface{} { return h.Peerstore().PubKey(h.ID()) },

@@ -4,6 +4,7 @@ package libp2p
 // those are in defaults.go).
 
 import (
+	"errors"
 	"fmt"
 	"net"
 
@@ -305,8 +306,16 @@ func EnableNATService() Option {
 // FilterAddresses configures libp2p to never dial nor accept connections from
 // the given addresses. FilterAddresses should be used for cases where the
 // addresses you want to deny are known ahead of time.
+// Note: You can not configure a ConnectionGater if you've added Filtered Addresses here.
+// Please consider ONLY configuring a ConnectionGater that rejects connections with the given remote addresses.
+// Deprecated: Please use ConnectionGater() instead.
 func FilterAddresses(addrs ...*net.IPNet) Option {
 	return func(cfg *Config) error {
+		if cfg.ConnectionGater != nil {
+			return errors.New("cannot configure both Filters and Connection Gater. " +
+				"\n Please consider configuring just a ConnectionGater instead.")
+		}
+
 		if cfg.Filters == nil {
 			cfg.Filters = filter.NewFilters()
 		}
@@ -321,9 +330,38 @@ func FilterAddresses(addrs ...*net.IPNet) Option {
 // certain addresses. Filters offers more control and should be used when the
 // addresses you want to accept/deny are not known ahead of time and can
 // dynamically change.
+// Note: You can not configure a ConnectionGater if you've configured a Filter here.
+// Please consider ONLY configuring a ConnectionGater that rejects connections which would
+// otherwise be rejected by the Filter.
+// Deprecated: Please use ConnectionGater() instead.
 func Filters(filters *filter.Filters) Option {
 	return func(cfg *Config) error {
+		if cfg.ConnectionGater != nil {
+			return errors.New("cannot configure both Filters and Connection Gater. " +
+				"\n Please consider configuring just a ConnectionGater instead.")
+
+		}
 		cfg.Filters = filters
+		return nil
+	}
+}
+
+// ConnectionGater configures libp2p to use the given ConnectionGater
+// to actively reject inbound/outbound connections based on the lifecycle state
+// of the connection. Please look at the documentation of ConenctionGater in go-libp2p-core
+// for more information.
+func ConnectionGater(cg connmgr.ConnectionGater) Option {
+	return func(cfg *Config) error {
+		if cfg.Filters != nil {
+			return errors.New("cannot configure both Filters and Connection Gater. " +
+				"\n Please consider configuring just a ConnectionGater instead.")
+
+		}
+		if cfg.ConnectionGater != nil {
+			return errors.New("can not configure multiple connection gaters")
+		}
+
+		cfg.ConnectionGater = cg
 		return nil
 	}
 }

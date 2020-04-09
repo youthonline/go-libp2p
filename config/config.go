@@ -70,9 +70,10 @@ type Config struct {
 	Relay       bool
 	RelayOpts   []circuit.RelayOpt
 
-	ListenAddrs  []ma.Multiaddr
-	AddrsFactory bhost.AddrsFactory
-	Filters      *filter.Filters
+	ListenAddrs     []ma.Multiaddr
+	AddrsFactory    bhost.AddrsFactory
+	Filters         *filter.Filters
+	ConnectionGater connmgr.ConnectionGater
 
 	ConnManager connmgr.ConnManager
 	NATManager  NATManagerC
@@ -123,8 +124,8 @@ func (cfg *Config) makeSwarm(ctx context.Context) (*swarm.Swarm, error) {
 
 	// TODO: Make the swarm implementation configurable.
 	swrm := swarm.NewSwarm(ctx, pid, cfg.Peerstore, cfg.Reporter)
-	if cfg.Filters != nil {
-		swrm.Filters = cfg.Filters
+	if cfg.ConnectionGater != nil {
+		swrm.ConnGater = cfg.ConnectionGater
 	}
 	return swrm, nil
 }
@@ -137,7 +138,7 @@ func (cfg *Config) addTransports(ctx context.Context, h host.Host) (err error) {
 	}
 	upgrader := new(tptu.Upgrader)
 	upgrader.PSK = cfg.PSK
-	upgrader.Filters = cfg.Filters
+	upgrader.ConnGater = cfg.ConnectionGater
 	if cfg.Insecure {
 		upgrader.Secure = makeInsecureTransport(h.ID(), cfg.PeerKey)
 	} else {
@@ -178,6 +179,10 @@ func (cfg *Config) addTransports(ctx context.Context, h host.Host) (err error) {
 //
 // This function consumes the config. Do not reuse it (really!).
 func (cfg *Config) NewNode(ctx context.Context) (host.Host, error) {
+	if cfg.Filters != nil {
+		cfg.ConnectionGater = cfg.Filters.ToConnectionGater()
+	}
+
 	swrm, err := cfg.makeSwarm(ctx)
 	if err != nil {
 		return nil, err
@@ -298,7 +303,7 @@ func (cfg *Config) NewNode(ctx context.Context) (host.Host, error) {
 			SecurityTransports: cfg.SecurityTransports,
 			Insecure:           cfg.Insecure,
 			PSK:                cfg.PSK,
-			Filters:            cfg.Filters,
+			ConnectionGater:    cfg.ConnectionGater,
 			Reporter:           cfg.Reporter,
 			PeerKey:            autonatPrivKey,
 
