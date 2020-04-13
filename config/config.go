@@ -153,7 +153,7 @@ func (cfg *Config) addTransports(ctx context.Context, h host.Host) (err error) {
 		return err
 	}
 
-	tpts, err := makeTransports(h, upgrader, cfg.Transports)
+	tpts, err := makeTransports(h, upgrader, cfg.ConnectionGater, cfg.Transports)
 	if err != nil {
 		return err
 	}
