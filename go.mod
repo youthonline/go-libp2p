@@ -13,7 +13,7 @@ require (
 	github.com/libp2p/go-libp2p-autonat v0.2.1
 	github.com/libp2p/go-libp2p-blankhost v0.1.4
 	github.com/libp2p/go-libp2p-circuit v0.2.1
-	github.com/libp2p/go-libp2p-core v0.5.2-0.20200409124714-2f4d34c727d9
+	github.com/libp2p/go-libp2p-core v0.5.2-0.20200413071328-7f44bb7684b5
 	github.com/libp2p/go-libp2p-discovery v0.3.0
 	github.com/libp2p/go-libp2p-loggables v0.1.0
 	github.com/libp2p/go-libp2p-mplex v0.2.3
@@ -21,11 +21,11 @@ require (
 	github.com/libp2p/go-libp2p-netutil v0.1.0
 	github.com/libp2p/go-libp2p-peerstore v0.2.2
 	github.com/libp2p/go-libp2p-secio v0.2.2
-	github.com/libp2p/go-libp2p-swarm v0.2.4-0.20200409133205-ebaba4650beb
+	github.com/libp2p/go-libp2p-swarm v0.2.4-0.20200413072055-fb9362ad8f18
 	github.com/libp2p/go-libp2p-testing v0.1.1
 	github.com/libp2p/go-libp2p-transport-upgrader v0.2.1-0.20200409125913-0e230d686845
 	github.com/libp2p/go-libp2p-yamux v0.2.7
-	github.com/libp2p/go-maddr-filter v0.0.6-0.20200409161522-7d461a35a284
+	github.com/libp2p/go-maddr-filter v0.0.6-0.20200413072735-e9280a573c47
 	github.com/libp2p/go-stream-muxer-multistream v0.2.0
 	github.com/libp2p/go-tcp-transport v0.2.0
 	github.com/libp2p/go-ws-transport v0.3.0
