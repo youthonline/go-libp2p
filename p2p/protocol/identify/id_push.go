@@ -2,7 +2,6 @@ package identify
 
 import (
 	"github.com/libp2p/go-libp2p-core/network"
-	"github.com/libp2p/go-libp2p-core/protocol"
 )
 
 // IDPush is the protocol.ID of the Identify push protocol. It sends full identify messages containing
@@ -17,11 +16,6 @@ const IDPush = "/p2p/id/push/1.1.0"
 // It is still supported for backwards compatibility if a remote peer does not support
 // the current version.
 const LegacyIDPush = "/ipfs/id/push/1.0.0"
-
-// Push pushes a full identify message to all peers containing the current state.
-func (ids *IDService) Push() {
-	ids.broadcast([]protocol.ID{IDPush, LegacyIDPush}, ids.requestHandler)
-}
 
 // pushHandler handles incoming identify push streams. The behaviour is identical to the ordinary identify protocol.
 func (ids *IDService) pushHandler(s network.Stream) {

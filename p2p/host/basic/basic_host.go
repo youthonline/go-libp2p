@@ -3,6 +3,7 @@ package basichost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -156,7 +157,7 @@ func NewHost(ctx context.Context, net network.Network, opts *HostOpts) (*BasicHo
 	if h.emitters.evtLocalProtocolsUpdated, err = h.eventbus.Emitter(&event.EvtLocalProtocolsUpdated{}); err != nil {
 		return nil, err
 	}
-	if h.emitters.evtLocalAddrsUpdated, err = h.eventbus.Emitter(&event.EvtLocalAddressesUpdated{}, eventbus.Stateful); err != nil {
+	if h.emitters.evtLocalAddrsUpdated, err = h.eventbus.Emitter(&event.EvtLocalAddressesUpdated{}); err != nil {
 		return nil, err
 	}
 
@@ -206,6 +207,16 @@ func NewHost(ctx context.Context, net network.Network, opts *HostOpts) (*BasicHo
 	}
 
 	net.SetStreamHandler(h.newStreamHandler)
+
+	// persist a signed peer record for self to the peerstore.
+	rec := peer.PeerRecordFromAddrInfo(peer.AddrInfo{h.ID(), h.Addrs()})
+	ev, err := record.Seal(rec, h.signKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create signed record for self, err=%s", err)
+	}
+	if _, err := cab.ConsumePeerRecord(ev, peerstore.PermanentAddrTTL); err != nil {
+		return nil, fmt.Errorf("failed to persist signed record to peerstore, err=%s", err)
+	}
 
 	return h, nil
 }
