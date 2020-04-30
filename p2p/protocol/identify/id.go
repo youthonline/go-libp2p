@@ -88,9 +88,6 @@ type IDService struct {
 
 	addrMu sync.Mutex
 
-	peerrec   *record.Envelope
-	peerrecMu sync.RWMutex
-
 	// our own observed addresses.
 	observedAddrs *ObservedAddrManager
 
@@ -99,6 +96,9 @@ type IDService struct {
 		evtPeerIdentificationCompleted event.Emitter
 		evtPeerIdentificationFailed    event.Emitter
 	}
+
+	phsMu sync.RWMutex
+	phs   map[peer.ID]*peerHandler
 }
 
 // NewIDService constructs a new *IDService and activates it by
@@ -123,6 +123,7 @@ func NewIDService(h host.Host, opts ...Option) *IDService {
 		ctxCancel:     cancel,
 		conns:         make(map[network.Conn]chan struct{}),
 		observedAddrs: NewObservedAddrManager(hostCtx, h),
+		phs:           make(map[peer.ID]*peerHandler),
 	}
 
 	// handle local protocol handler updates, and push deltas to peers.
@@ -146,11 +147,11 @@ func NewIDService(h host.Host, opts ...Option) *IDService {
 
 	// register protocols that do not depend on peer records.
 	h.SetStreamHandler(IDDelta, s.deltaHandler)
-	h.SetStreamHandler(LegacyID, s.requestHandler)
+	h.SetStreamHandler(LegacyID, s.sendIdentifyResp)
 	h.SetStreamHandler(LegacyIDPush, s.pushHandler)
 
 	// register protocols that depend on peer records.
-	h.SetStreamHandler(ID, s.requestHandler)
+	h.SetStreamHandler(ID, s.sendIdentifyResp)
 	h.SetStreamHandler(IDPush, s.pushHandler)
 
 	h.Network().Notify((*netNotifiee)(s))
@@ -175,11 +176,15 @@ func (ids *IDService) handleEvents() {
 			if !more {
 				return
 			}
-			switch evt := e.(type) {
+			switch e.(type) {
 			case event.EvtLocalAddressesUpdated:
-				ids.handleLocalAddrsUpdated(evt)
+				ids.signalStateChange(func(ps *peerHandler) chan struct{} {
+					return ps.addrChangeCh
+				})
 			case event.EvtLocalProtocolsUpdated:
-				ids.handleProtosChanged(evt)
+				ids.signalStateChange(func(ps *peerHandler) chan struct{} {
+					return ps.protoChangeCh
+				})
 			}
 
 		case <-ids.ctx.Done():
@@ -197,18 +202,18 @@ func (ids *IDService) Close() error {
 	return nil
 }
 
-func (ids *IDService) handleProtosChanged(evt event.EvtLocalProtocolsUpdated) {
-	ids.fireProtocolDelta(evt)
-}
+func (ids *IDService) signalStateChange(getChFnc func(ps *peerHandler) chan struct{}) {
+	ids.phsMu.RLock()
+	defer ids.phsMu.RUnlock()
 
-func (ids *IDService) handleLocalAddrsUpdated(evt event.EvtLocalAddressesUpdated) {
-	ids.peerrecMu.Lock()
-	rec := evt.SignedPeerRecord
-	ids.peerrec = rec
-	ids.peerrecMu.Unlock()
-
-	log.Debug("triggering push based on updated local PeerRecord")
-	ids.Push()
+	for pid := range ids.phs {
+		select {
+		case getChFnc(ids.phs[pid]) <- struct{}{}:
+		default:
+			log.Debugf("dropping state change signal for peer %s as channel is full",
+				pid)
+		}
+	}
 }
 
 // OwnObservedAddrs returns the addresses peers have reported we've dialed from
@@ -310,7 +315,7 @@ func protoSupportsPeerRecords(proto protocol.ID) bool {
 	return proto == ID || proto == IDPush
 }
 
-func (ids *IDService) requestHandler(s network.Stream) {
+func (ids *IDService) sendIdentifyResp(s network.Stream) {
 	defer helpers.FullClose(s)
 	c := s.Conn()
 
@@ -411,9 +416,11 @@ func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn, usePeerR
 	mes.ObservedAddr = c.RemoteMultiaddr().Bytes()
 
 	if usePeerRecords {
-		ids.peerrecMu.RLock()
-		rec := ids.peerrec
-		ids.peerrecMu.RUnlock()
+		var rec *record.Envelope
+		cab, ok := peerstore.GetCertifiedAddrBook(ids.Host.Peerstore())
+		if ok {
+			rec = cab.GetPeerRecord(ids.Host.ID())
+		}
 
 		if rec == nil {
 			log.Errorf("latest peer record does not exist. identify message incomplete!")
