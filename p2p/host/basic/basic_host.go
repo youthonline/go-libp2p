@@ -37,9 +37,6 @@ import (
 // peer (for all addresses).
 const maxAddressResolution = 32
 
-// addrChangeTickrInterval is the interval between two address change ticks.
-var addrChangeTickrInterval = 5 * time.Second
-
 var log = logging.Logger("basichost")
 
 var (
@@ -215,10 +212,10 @@ func NewHost(ctx context.Context, net network.Network, opts *HostOpts) (*BasicHo
 	rec := peer.PeerRecordFromAddrInfo(peer.AddrInfo{h.ID(), h.Addrs()})
 	ev, err := record.Seal(rec, h.signKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signed record for self: %w", err)
+		return nil, fmt.Errorf("failed to create signed record for self, err=%s", err)
 	}
 	if _, err := cab.ConsumePeerRecord(ev, peerstore.PermanentAddrTTL); err != nil {
-		return nil, fmt.Errorf("failed to persist signed record to peerstore: %w", err)
+		return nil, fmt.Errorf("failed to persist signed record to peerstore, err=%s", err)
 	}
 
 	return h, nil
@@ -406,7 +403,7 @@ func (h *BasicHost) background() {
 
 	// periodically schedules an IdentifyPush to update our peers for changes
 	// in our address set (if needed)
-	ticker := time.NewTicker(addrChangeTickrInterval)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
