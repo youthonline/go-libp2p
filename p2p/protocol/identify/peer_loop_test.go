@@ -2,10 +2,8 @@ package identify
 
 import (
 	"context"
-	"testing"
-
 	"github.com/libp2p/go-libp2p-core/network"
-	"github.com/libp2p/go-libp2p-core/peer"
+	"testing"
 
 	blhost "github.com/libp2p/go-libp2p-blankhost"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
@@ -24,16 +22,19 @@ func doeval(t *testing.T, ph *peerHandler, f func()) {
 }
 
 func TestMakeApplyDelta(t *testing.T) {
-	isTesting = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
 	defer h1.Close()
 	ids1 := NewIDService(h1)
-	ph := newPeerHandler(h1.ID(), ids1, &pb.Identify{})
-	ph.start()
-	defer ph.close()
+	ph := newPeerHandler(h1.ID(), ids1)
+	require.Nil(t, ph.mkDelta())
+
+	// set id to empty
+	doeval(t, ph, func() {
+		ph.lastIdMsgSent = &pb.Identify{}
+	})
 
 	m1 := ph.mkDelta()
 	require.NotNil(t, m1)
@@ -82,34 +83,13 @@ func TestMakeApplyDelta(t *testing.T) {
 }
 
 func TestHandlerClose(t *testing.T) {
-	isTesting = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
 	defer h1.Close()
 	ids1 := NewIDService(h1)
-	ph := newPeerHandler(h1.ID(), ids1, nil)
-	ph.start()
+	ph := newPeerHandler(h1.ID(), ids1)
 
 	require.NoError(t, ph.close())
-}
-
-func TestPeerSupportsProto(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	defer h1.Close()
-	ids1 := NewIDService(h1)
-
-	rp := peer.ID("test")
-	ph := newPeerHandler(rp, ids1, nil)
-	require.NoError(t, h1.Peerstore().AddProtocols(rp, "test"))
-	require.True(t, ph.peerSupportsProtos([]string{"test"}))
-	require.False(t, ph.peerSupportsProtos([]string{"random"}))
-
-	// remove support for protocol and check
-	require.NoError(t, h1.Peerstore().RemoveProtocols(rp, "test"))
-	require.False(t, ph.peerSupportsProtos([]string{"test"}))
 }
