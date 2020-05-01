@@ -3,17 +3,20 @@ package identify
 import (
 	"context"
 	"errors"
-	ggio "github.com/gogo/protobuf/io"
-	"github.com/libp2p/go-libp2p-core/helpers"
-	"github.com/libp2p/go-libp2p-core/network"
-	"github.com/libp2p/go-libp2p-core/protocol"
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p-core/helpers"
+	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/protocol"
 
 	pb "github.com/libp2p/go-libp2p/p2p/protocol/identify/pb"
+
+	ggio "github.com/gogo/protobuf/io"
 )
+
+var errProtocolNotSupported = errors.New("protocol not supported")
 
 type peerHandler struct {
 	ids *IDService
@@ -24,26 +27,30 @@ type peerHandler struct {
 
 	pid peer.ID
 
-	lastIdMsg *pb.Identify
+	msgMu         sync.RWMutex
+	lastIdMsgSent *pb.Identify
 
 	addrChangeCh  chan struct{}
 	protoChangeCh chan struct{}
+	evalTestCh    chan func() // for testing
 }
 
 func newPeerHandler(pid peer.ID, ids *IDService) *peerHandler {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ph := &peerHandler{
-		ids:           ids,
-		ctx:           ctx,
-		cancel:        cancel,
-		pid:           pid,
+		ids:    ids,
+		ctx:    ctx,
+		cancel: cancel,
+		pid:    pid,
+
 		addrChangeCh:  make(chan struct{}, 1),
 		protoChangeCh: make(chan struct{}, 1),
+		evalTestCh:    make(chan func()),
 	}
 
 	ph.wg.Add(1)
-	ph.loop()
+	go ph.loop()
 	return ph
 }
 
@@ -61,48 +68,42 @@ func (ph *peerHandler) loop() {
 		select {
 		// our listen addresses have changed, send an IDPush.
 		case <-ph.addrChangeCh:
-			dp, _ := ph.openStream([]string{IDPush, LegacyIDPush})
-			// failed to open a push stream
-			if dp == nil {
+			dp, err := ph.openStream([]string{IDPush, LegacyIDPush})
+			if err != nil {
 				continue
 			}
 
 			mes := &pb.Identify{}
 			ph.ids.populateMessage(mes, dp.Conn(), protoSupportsPeerRecords(dp.Protocol()))
-			if err := ph.writePush(dp, mes); err != nil {
+			if err := ph.sendMessage(dp, mes); err != nil {
 				continue
 			}
-			ph.lastIdMsg = mes
+
+			// update the last message sent post a successful push
+			ph.lastIdMsgSent = mes
 
 		case <-ph.protoChangeCh:
+			// we send a delta ONLY if we've sent a full state before.
 			mes := ph.mkDelta()
-			// no delta to send
 			if mes == nil || (len(mes.AddedProtocols) == 0 && len(mes.RmProtocols) == 0) {
 				continue
 			}
 
-			ds, _ := ph.openStream([]string{IDDelta})
-			// failed to open a delta stream
-			if ds == nil {
+			ds, err := ph.openStream([]string{IDDelta})
+			if err != nil {
 				continue
 			}
 
-			// update our identify snapshot for this peer if by applying the delta to it
-			// if the delta was successfully sent.
-			if err := ph.writeDelta(ds, mes); err == nil {
-				for _, p1 := range mes.RmProtocols {
-					for j, p2 := range ph.lastIdMsg.Protocols {
-						if p2 == p1 {
-							ph.lastIdMsg.Protocols[j] = ph.lastIdMsg.Protocols[len(ph.lastIdMsg.Protocols)-1]
-							ph.lastIdMsg.Protocols = ph.lastIdMsg.Protocols[:len(ph.lastIdMsg.Protocols)-1]
-						}
-					}
-				}
-
-				for _, p := range mes.AddedProtocols {
-					ph.lastIdMsg.Protocols = append(ph.lastIdMsg.Protocols, p)
-				}
+			if err := ph.sendMessage(ds, &pb.Identify{Delta: mes}); err != nil {
+				continue
 			}
+
+			// update our identify snapshot for this peer by applying the delta to it
+			// if the delta was successfully sent.
+			ph.applyDelta(mes)
+
+		case fnc := <-ph.evalTestCh:
+			fnc()
 
 		case <-ph.ctx.Done():
 			return
@@ -110,15 +111,39 @@ func (ph *peerHandler) loop() {
 	}
 }
 
-func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
-	pstore := ph.ids.Host.Peerstore()
-
-	// avoid the unnecessary stream if the peer does not support the protocol.
-	if sup, err := pstore.SupportsProtocols(ph.pid, protos...); err != nil && len(sup) == 0 {
-		return nil, errors.New("protocol not supported")
+func (ph *peerHandler) applyDelta(mes *pb.Delta) {
+	for _, p1 := range mes.RmProtocols {
+		for j, p2 := range ph.lastIdMsgSent.Protocols {
+			if p2 == p1 {
+				ph.lastIdMsgSent.Protocols[j] = ph.lastIdMsgSent.Protocols[len(ph.lastIdMsgSent.Protocols)-1]
+				ph.lastIdMsgSent.Protocols = ph.lastIdMsgSent.Protocols[:len(ph.lastIdMsgSent.Protocols)-1]
+			}
+		}
 	}
 
-	// negotiate a stream without opening a new connection as we should already have a connection.
+	for _, p := range mes.AddedProtocols {
+		ph.lastIdMsgSent.Protocols = append(ph.lastIdMsgSent.Protocols, p)
+	}
+}
+
+func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
+	// wait for the other peer to send us an Identify response on "all" connections we have with it
+	// so we can look at it's supported protocols and avoid a multistream-select roundtrip to negotiate the protocol
+	// if we know for a fact that it dosen't support the protocol.
+	conns := ph.ids.Host.Network().ConnsToPeer(ph.pid)
+	for _, c := range conns {
+		select {
+		case <-ph.ids.IdentifyWait(c):
+		case <-ph.ctx.Done():
+			return nil, ph.ctx.Err()
+		}
+	}
+	pstore := ph.ids.Host.Peerstore()
+	if sup, err := pstore.SupportsProtocols(ph.pid, protos...); err != nil && len(sup) == 0 {
+		return nil, errProtocolNotSupported
+	}
+
+	// negotiate a stream without opening a new connection as we "should" already have a connection.
 	ctx, cancel := context.WithTimeout(ph.ctx, 30*time.Second)
 	defer cancel()
 	ctx = network.WithNoDial(ctx, "should already have connection")
@@ -127,7 +152,7 @@ func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
 	// the list of protocols passed to it.
 	s, err := ph.ids.Host.NewStream(ctx, ph.pid, protocol.ConvertFromStrings(protos)...)
 	if err != nil {
-		log.Debugf("error opening delta stream to %s: %s", ph.pid, err.Error())
+		log.Warnf("failed to open %s stream with peer %s, err=%s", protos, ph.pid.Pretty(), err)
 		return nil, err
 	}
 
@@ -135,11 +160,11 @@ func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
 }
 
 func (ph *peerHandler) mkDelta() *pb.Delta {
-	if ph.lastIdMsg == nil {
+	if ph.lastIdMsgSent == nil {
 		return nil
 	}
 
-	old := ph.lastIdMsg.GetProtocols()
+	old := ph.lastIdMsgSent.GetProtocols()
 	curr := ph.ids.Host.Mux().Protocols()
 
 	oldProtos := make(map[string]struct{}, len(old))
@@ -176,24 +201,13 @@ func (ph *peerHandler) mkDelta() *pb.Delta {
 	}
 }
 
-func (ph *peerHandler) writeDelta(s network.Stream, mes *pb.Delta) error {
+func (ph *peerHandler) sendMessage(s network.Stream, mes *pb.Identify) error {
 	defer helpers.FullClose(s)
 	c := s.Conn()
-	if err := ggio.NewDelimitedWriter(s).WriteMsg(&pb.Identify{Delta: mes}); err != nil {
-		log.Warnf("%s error while sending delta update to %s: %s", IDDelta, c.RemotePeer(), c.RemoteMultiaddr())
+	if err := ggio.NewDelimitedWriter(s).WriteMsg(mes); err != nil {
+		log.Warnf("error while sending %s update to %s: err=%s", s.Protocol(), c.RemotePeer(), err)
 		return err
 	}
-	log.Debugf("%s sent delta update to %s: %s", IDDelta, c.RemotePeer(), c.RemoteMultiaddr())
-	return nil
-}
-
-func (ph *peerHandler) writePush(s network.Stream, mes *pb.Identify) error {
-	defer helpers.FullClose(s)
-	c := s.Conn()
-	w := ggio.NewDelimitedWriter(s)
-	if err := w.WriteMsg(mes); err != nil {
-		return err
-	}
-	log.Debugf("%s sent message to %s %s", ID, c.RemotePeer(), c.RemoteMultiaddr())
+	log.Debugf("sent %s update to %s: %s", s.Protocol(), c.RemotePeer(), c.RemoteMultiaddr())
 	return nil
 }
