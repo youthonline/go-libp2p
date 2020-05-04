@@ -28,14 +28,14 @@ type peerHandler struct {
 	pid peer.ID
 
 	msgMu         sync.RWMutex
-	lastIdMsgSent *pb.Identify
+	idMsgSnapshot *pb.Identify
 
-	addrChangeCh  chan struct{}
-	protoChangeCh chan struct{}
-	evalTestCh    chan func() // for testing
+	pushCh     chan struct{}
+	deltaCh    chan struct{}
+	evalTestCh chan func() // for testing
 }
 
-func newPeerHandler(pid peer.ID, ids *IDService) *peerHandler {
+func newPeerHandler(pid peer.ID, ids *IDService, initState *pb.Identify) *peerHandler {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ph := &peerHandler{
@@ -44,9 +44,11 @@ func newPeerHandler(pid peer.ID, ids *IDService) *peerHandler {
 		cancel: cancel,
 		pid:    pid,
 
-		addrChangeCh:  make(chan struct{}, 1),
-		protoChangeCh: make(chan struct{}, 1),
-		evalTestCh:    make(chan func()),
+		idMsgSnapshot: initState,
+
+		pushCh:     make(chan struct{}, 1),
+		deltaCh:    make(chan struct{}, 1),
+		evalTestCh: make(chan func()),
 	}
 
 	ph.wg.Add(1)
@@ -67,7 +69,7 @@ func (ph *peerHandler) loop() {
 	for {
 		select {
 		// our listen addresses have changed, send an IDPush.
-		case <-ph.addrChangeCh:
+		case <-ph.pushCh:
 			dp, err := ph.openStream([]string{IDPush, LegacyIDPush})
 			if err != nil {
 				continue
@@ -75,32 +77,30 @@ func (ph *peerHandler) loop() {
 
 			mes := &pb.Identify{}
 			ph.ids.populateMessage(mes, dp.Conn(), protoSupportsPeerRecords(dp.Protocol()))
-			if err := ph.sendMessage(dp, mes); err != nil {
-				continue
-			}
 
-			// update the last message sent post a successful push
-			ph.lastIdMsgSent = mes
+			ph.msgMu.Lock()
+			ph.idMsgSnapshot = mes
+			ph.msgMu.Unlock()
 
-		case <-ph.protoChangeCh:
-			// we send a delta ONLY if we've sent a full state before.
+			ph.sendMessage(dp, mes)
+
+		case <-ph.deltaCh:
 			mes := ph.mkDelta()
 			if mes == nil || (len(mes.AddedProtocols) == 0 && len(mes.RmProtocols) == 0) {
 				continue
 			}
+
+			ph.msgMu.Lock()
+			// update our identify snapshot for this peer by applying the delta to it
+			ph.applyDelta(mes)
+			ph.msgMu.Unlock()
 
 			ds, err := ph.openStream([]string{IDDelta})
 			if err != nil {
 				continue
 			}
 
-			if err := ph.sendMessage(ds, &pb.Identify{Delta: mes}); err != nil {
-				continue
-			}
-
-			// update our identify snapshot for this peer by applying the delta to it
-			// if the delta was successfully sent.
-			ph.applyDelta(mes)
+			ph.sendMessage(ds, &pb.Identify{Delta: mes})
 
 		case fnc := <-ph.evalTestCh:
 			fnc()
@@ -113,16 +113,16 @@ func (ph *peerHandler) loop() {
 
 func (ph *peerHandler) applyDelta(mes *pb.Delta) {
 	for _, p1 := range mes.RmProtocols {
-		for j, p2 := range ph.lastIdMsgSent.Protocols {
+		for j, p2 := range ph.idMsgSnapshot.Protocols {
 			if p2 == p1 {
-				ph.lastIdMsgSent.Protocols[j] = ph.lastIdMsgSent.Protocols[len(ph.lastIdMsgSent.Protocols)-1]
-				ph.lastIdMsgSent.Protocols = ph.lastIdMsgSent.Protocols[:len(ph.lastIdMsgSent.Protocols)-1]
+				ph.idMsgSnapshot.Protocols[j] = ph.idMsgSnapshot.Protocols[len(ph.idMsgSnapshot.Protocols)-1]
+				ph.idMsgSnapshot.Protocols = ph.idMsgSnapshot.Protocols[:len(ph.idMsgSnapshot.Protocols)-1]
 			}
 		}
 	}
 
 	for _, p := range mes.AddedProtocols {
-		ph.lastIdMsgSent.Protocols = append(ph.lastIdMsgSent.Protocols, p)
+		ph.idMsgSnapshot.Protocols = append(ph.idMsgSnapshot.Protocols, p)
 	}
 }
 
@@ -160,11 +160,7 @@ func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
 }
 
 func (ph *peerHandler) mkDelta() *pb.Delta {
-	if ph.lastIdMsgSent == nil {
-		return nil
-	}
-
-	old := ph.lastIdMsgSent.GetProtocols()
+	old := ph.idMsgSnapshot.GetProtocols()
 	curr := ph.ids.Host.Mux().Protocols()
 
 	oldProtos := make(map[string]struct{}, len(old))

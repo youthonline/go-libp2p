@@ -63,6 +63,15 @@ func init() {
 // transientTTL is a short ttl for invalidated previously connected addrs
 const transientTTL = 10 * time.Second
 
+type addPeerHandlerReq struct {
+	s    network.Stream
+	resp chan *peerHandler
+}
+
+type rmPeerHandlerReq struct {
+	p peer.ID
+}
+
 // IDService is a structure that implements ProtocolIdentify.
 // It is a trivial service that gives the other peer some
 // useful information about the local peer. A sort of hello.
@@ -97,8 +106,8 @@ type IDService struct {
 		evtPeerIdentificationFailed    event.Emitter
 	}
 
-	phsMu sync.RWMutex
-	phs   map[peer.ID]*peerHandler
+	addPeerHandlerCh chan *addPeerHandlerReq
+	rmPeerHandlerCh  chan *rmPeerHandlerReq
 }
 
 // NewIDService constructs a new *IDService and activates it by
@@ -123,14 +132,16 @@ func NewIDService(h host.Host, opts ...Option) *IDService {
 		ctxCancel:     cancel,
 		conns:         make(map[network.Conn]chan struct{}),
 		observedAddrs: NewObservedAddrManager(hostCtx, h),
-		phs:           make(map[peer.ID]*peerHandler),
+
+		addPeerHandlerCh: make(chan *addPeerHandlerReq),
+		rmPeerHandlerCh:  make(chan *rmPeerHandlerReq),
 	}
 
 	// handle local protocol handler updates, and push deltas to peers.
 	var err error
 
 	s.refCount.Add(1)
-	go s.handleEvents()
+	go s.loop()
 
 	s.emitters.evtPeerProtocolsUpdated, err = h.EventBus().Emitter(&event.EvtPeerProtocolsUpdated{})
 	if err != nil {
@@ -158,9 +169,10 @@ func NewIDService(h host.Host, opts ...Option) *IDService {
 	return s
 }
 
-func (ids *IDService) handleEvents() {
+func (ids *IDService) loop() {
 	defer ids.refCount.Done()
 
+	phs := make(map[peer.ID]*peerHandler)
 	sub, err := ids.Host.EventBus().Subscribe([]interface{}{&event.EvtLocalProtocolsUpdated{},
 		&event.EvtLocalAddressesUpdated{}}, eventbus.BufSize(256))
 	if err != nil {
@@ -168,23 +180,78 @@ func (ids *IDService) handleEvents() {
 		return
 	}
 
-	defer sub.Close()
+	defer func() {
+		sub.Close()
+		for pid := range phs {
+			phs[pid].close()
+		}
+	}()
+
+	phClosedCh := make(chan peer.ID)
 
 	for {
 		select {
+		case addReq := <-ids.addPeerHandlerCh:
+			rp := addReq.s.Conn().RemotePeer()
+			ph, ok := phs[rp]
+			if ok {
+				addReq.resp <- ph
+				continue
+			}
+
+			if ids.Host.Network().Connectedness(rp) == network.Connected {
+				mes := &pb.Identify{}
+				ids.populateMessage(mes, addReq.s.Conn(), protoSupportsPeerRecords(addReq.s.Protocol()))
+				ph = newPeerHandler(rp, ids, mes)
+				phs[rp] = ph
+				addReq.resp <- ph
+			}
+
+		case rmReq := <-ids.rmPeerHandlerCh:
+			rp := rmReq.p
+			if ids.Host.Network().Connectedness(rp) != network.Connected {
+				// before we remove the peerhandler, we should ensure that it will not send any
+				// more messages. Otherwise, we might create a new handler and the Identify response
+				// synchronized with the new handler might be overwritten by a message sent by this handler.
+				ids.refCount.Add(1)
+				go func(req *rmPeerHandlerReq, ph *peerHandler) {
+					defer ids.refCount.Done()
+					if ph != nil {
+						ph.close()
+						select {
+						case <-ids.ctx.Done():
+							return
+						case phClosedCh <- req.p:
+						}
+					}
+				}(rmReq, phs[rp])
+			}
+
+		case p := <-phClosedCh:
+			delete(phs, p)
+
 		case e, more := <-sub.Out():
 			if !more {
 				return
 			}
 			switch e.(type) {
 			case event.EvtLocalAddressesUpdated:
-				ids.signalStateChange(func(ps *peerHandler) chan struct{} {
-					return ps.addrChangeCh
-				})
+				for pid := range phs {
+					select {
+					case phs[pid].pushCh <- struct{}{}:
+					default:
+						log.Debugf("dropping addr updated message for %s as buffer full", pid.Pretty())
+					}
+				}
+
 			case event.EvtLocalProtocolsUpdated:
-				ids.signalStateChange(func(ps *peerHandler) chan struct{} {
-					return ps.protoChangeCh
-				})
+				for pid := range phs {
+					select {
+					case phs[pid].deltaCh <- struct{}{}:
+					default:
+						log.Debugf("dropping protocol updated message for %s as buffer full", pid.Pretty())
+					}
+				}
 			}
 
 		case <-ids.ctx.Done():
@@ -200,20 +267,6 @@ func (ids *IDService) Close() error {
 		ids.refCount.Wait()
 	})
 	return nil
-}
-
-func (ids *IDService) signalStateChange(getChFnc func(ps *peerHandler) chan struct{}) {
-	ids.phsMu.RLock()
-	defer ids.phsMu.RUnlock()
-
-	for pid := range ids.phs {
-		select {
-		case getChFnc(ids.phs[pid]) <- struct{}{}:
-		default:
-			log.Debugf("dropping state change signal for peer %s as channel is full",
-				pid)
-		}
-	}
 }
 
 // OwnObservedAddrs returns the addresses peers have reported we've dialed from
@@ -316,13 +369,33 @@ func protoSupportsPeerRecords(proto protocol.ID) bool {
 }
 
 func (ids *IDService) sendIdentifyResp(s network.Stream) {
-	defer helpers.FullClose(s)
+	var ph *peerHandler
+
+	defer func() {
+		helpers.FullClose(s)
+		if ph != nil {
+			ph.msgMu.RUnlock()
+		}
+	}()
+
 	c := s.Conn()
 
+	phCh := make(chan *peerHandler, 1)
+	select {
+	case ids.addPeerHandlerCh <- &addPeerHandlerReq{s, phCh}:
+	case <-ids.ctx.Done():
+		return
+	}
+
+	select {
+	case ph = <-phCh:
+	case <-ids.ctx.Done():
+		return
+	}
+
+	ph.msgMu.RLock()
 	w := ggio.NewDelimitedWriter(s)
-	mes := pb.Identify{}
-	ids.populateMessage(&mes, s.Conn(), protoSupportsPeerRecords(s.Protocol()))
-	w.WriteMsg(&mes)
+	w.WriteMsg(ph.idMsgSnapshot)
 
 	log.Debugf("%s sent message to %s %s", ID, c.RemotePeer(), c.RemoteMultiaddr())
 }
@@ -708,6 +781,13 @@ func (nn *netNotifiee) Disconnected(n network.Network, v network.Conn) {
 	defer ids.addrMu.Unlock()
 
 	if ids.Host.Network().Connectedness(v.RemotePeer()) != network.Connected {
+		// consider removing the peer handler for this
+		select {
+		case ids.rmPeerHandlerCh <- &rmPeerHandlerReq{v.RemotePeer()}:
+		case <-ids.ctx.Done():
+			return
+		}
+
 		// Last disconnect.
 		ps := ids.Host.Peerstore()
 		ps.UpdateAddrs(v.RemotePeer(), peerstore.ConnectedAddrTTL, peerstore.RecentlyConnectedAddrTTL)

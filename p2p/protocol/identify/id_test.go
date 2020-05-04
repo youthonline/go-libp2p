@@ -3,9 +3,9 @@ package identify_test
 import (
 	"context"
 	"fmt"
-	"github.com/libp2p/go-libp2p-core/record"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +28,7 @@ import (
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	ma "github.com/multiformats/go-multiaddr"
+	"github.com/stretchr/testify/require"
 )
 
 func subtestIDService(t *testing.T) {
@@ -36,8 +37,6 @@ func subtestIDService(t *testing.T) {
 
 	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
 	h2 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	generatePeerRecord(t, h1)
-	generatePeerRecord(t, h2)
 
 	h1p := h1.ID()
 	h2p := h2.ID()
@@ -217,36 +216,6 @@ func testHasPublicKey(t *testing.T, h host.Host, p peer.ID, shouldBe ic.PubKey) 
 	}
 }
 
-// we're using BlankHost in our tests, which doesn't automatically generate peer records
-// like BasicHost. This generates a record and puts it on the host's event bus, which
-// will cause the identify service to start supporting new protocol versions that
-// depend on peer records being available.
-func generatePeerRecord(t *testing.T, h host.Host) {
-	t.Helper()
-
-	key := h.Peerstore().PrivKey(h.ID())
-	if key == nil {
-		t.Fatal("no private key for host")
-	}
-
-	rec := peer.NewPeerRecord()
-	rec.PeerID = h.ID()
-	rec.Addrs = h.Addrs()
-	signed, err := record.Seal(rec, key)
-	if err != nil {
-		t.Fatalf("error generating peer record: %s", err)
-	}
-	evt := event.EvtLocalAddressesUpdated{SignedPeerRecord: signed}
-	emitter, err := h.EventBus().Emitter(new(event.EvtLocalAddressesUpdated), eventbus.Stateful)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = emitter.Emit(evt)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestIDServiceWait gives the ID service 1s to finish after dialing
 // this is because it used to be concurrent. Now, Dial wait till the
 // id service is done.
@@ -407,72 +376,83 @@ func TestIdentifyDeltaOnProtocolChange(t *testing.T) {
 	// add two new protocols in h2 and wait for identify to send deltas.
 	h2.SetStreamHandler(protocol.ID("foo"), func(_ network.Stream) {})
 	h2.SetStreamHandler(protocol.ID("bar"), func(_ network.Stream) {})
-	<-time.After(500 * time.Millisecond)
 
 	// check that h1 now knows about h2's new protocols.
-	protos, err = h1.Peerstore().GetProtocols(h2.ID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	have := make(map[string]struct{}, len(protos))
-	for _, p := range protos {
-		have[p] = struct{}{}
-	}
+	require.Eventually(t, func() bool {
+		protos, err = h1.Peerstore().GetProtocols(h2.ID())
+		if err != nil {
+			return false
+		}
+		have := make(map[string]struct{}, len(protos))
+		for _, p := range protos {
+			have[p] = struct{}{}
+		}
 
-	if _, ok := have["foo"]; !ok {
-		t.Fatalf("expected peer 1 to know that peer 2 now speaks protocol 'foo', known: %v", protos)
-	}
-	if _, ok := have["bar"]; !ok {
-		t.Fatalf("expected peer 1 to know that peer 2 now speaks protocol 'bar', known: %v", protos)
-	}
+		_, okfoo := have["foo"]
+		_, okbar := have["bar"]
+		return okfoo && okbar
+	}, 5*time.Second, 500*time.Millisecond)
 
 	// remove one of the newly added protocols from h2, and wait for identify to send the delta.
 	h2.RemoveStreamHandler(protocol.ID("bar"))
-	<-time.After(500 * time.Millisecond)
-
 	// check that h1 now has forgotten about h2's bar protocol.
-	protos, err = h1.Peerstore().GetProtocols(h2.ID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	have = make(map[string]struct{}, len(protos))
-	for _, p := range protos {
-		have[p] = struct{}{}
-	}
-	if _, ok := have["foo"]; !ok {
-		t.Fatalf("expected peer 1 to know that peer 2 now speaks protocol 'foo', known: %v", protos)
-	}
-	if _, ok := have["bar"]; ok {
-		t.Fatalf("expected peer 1 to have forgotten that peer 2 spoke protocol 'bar', known: %v", protos)
-	}
+	require.Eventually(t, func() bool {
+		protos, err = h1.Peerstore().GetProtocols(h2.ID())
+		if err != nil {
+			return false
+		}
+		have := make(map[string]struct{}, len(protos))
+		for _, p := range protos {
+			have[p] = struct{}{}
+		}
+
+		_, okfoo := have["foo"]
+		_, okbar := have["bar"]
+		return okfoo && !okbar
+	}, 5*time.Second, 500*time.Millisecond)
 
 	// make sure that h1 emitted events in the eventbus for h2's protocol updates.
-	evts := make([]event.EvtPeerProtocolsUpdated, 3)
 	done := make(chan struct{})
+
+	var lk sync.Mutex
+	var added []string
+	var removed []string
+	var success bool
+
 	go func() {
-		evts[0] = (<-sub.Out()).(event.EvtPeerProtocolsUpdated)
-		evts[1] = (<-sub.Out()).(event.EvtPeerProtocolsUpdated)
-		evts[2] = (<-sub.Out()).(event.EvtPeerProtocolsUpdated)
+		defer close(done)
+		for {
+			select {
+			case <-time.After(5 * time.Second):
+				return
+			case e, ok := <-sub.Out():
+				if !ok {
+					return
+				}
+				evt := e.(event.EvtPeerProtocolsUpdated)
+				lk.Lock()
+				added = append(added, protocol.ConvertToStrings(evt.Added)...)
+				removed = append(removed, protocol.ConvertToStrings(evt.Removed)...)
+				sort.Strings(added)
+				sort.Strings(removed)
+				if reflect.DeepEqual(added, []string{"bar", "foo"}) &&
+					reflect.DeepEqual(removed, []string{"bar"}) {
+					success = true
+					lk.Unlock()
+					return
+				}
+				lk.Unlock()
+			}
+		}
+
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatalf("timed out while consuming events from subscription")
-	}
+	<-done
 
-	added := protocol.ConvertToStrings(append(evts[0].Added, append(evts[1].Added, evts[2].Added...)...))
-	removed := protocol.ConvertToStrings(append(evts[0].Removed, append(evts[1].Removed, evts[2].Removed...)...))
-	sort.Strings(added)
-	sort.Strings(removed)
-
-	if !reflect.DeepEqual(added, []string{"bar", "foo"}) {
-		t.Fatalf("expected to have received updates for added protos")
-	}
-	if !reflect.DeepEqual(removed, []string{"bar"}) {
-		t.Fatalf("expected to have received updates for removed protos")
-	}
+	lk.Lock()
+	defer lk.Unlock()
+	require.True(t, success, "did not get correct peer protocol updated events")
 }
 
 // TestIdentifyDeltaWhileIdentifyingConn tests that the host waits to push delta updates if an identify is ongoing.
@@ -579,52 +559,4 @@ func TestUserAgent(t *testing.T) {
 	if ver, ok := av.(string); !ok || ver != "bar" {
 		t.Errorf("expected agent version %q, got %q", "bar", av)
 	}
-}
-
-// make sure that we still support older peers using "legacy" versions of identify
-func TestCompatibilityWithPeersThatDoNotSupportSignedAddrs(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	h2 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	defer h2.Close()
-	defer h1.Close()
-
-	ids := identify.NewIDService(h1)
-	ids2 := identify.NewIDService(h2)
-
-	defer ids.Close()
-	defer ids2.Close()
-
-	// generate initial peer record only for h1. this will cause h1 to enable
-	// the new protocols, but h2 will still use legacy protos
-	generatePeerRecord(t, h1)
-
-	h2p := h2.ID()
-	h2pi := h2.Peerstore().PeerInfo(h2p)
-	if err := h1.Connect(ctx, h2pi); err != nil {
-		t.Fatal(err)
-	}
-
-	h1t2c := h1.Network().ConnsToPeer(h2p)
-	if len(h1t2c) == 0 {
-		t.Fatal("should have a conn here")
-	}
-
-	ids.IdentifyConn(h1t2c[0])
-	// the IDService should be opened automatically, by the network.
-	// what we should see now is that both peers know about each others listen addresses.
-	t.Log("test peer1 has peer2 addrs correctly")
-	testKnowsAddrs(t, h1, h2p, h2.Peerstore().Addrs(h2p)) // has them
-	testHasCertifiedAddrs(t, h1, h2p, []ma.Multiaddr{})   // should not have signed addrs
-
-	// double check that it works when both peers support the new protos
-	// enable new protos for h2 by generating a peer record
-	generatePeerRecord(t, h2)
-
-	// if we re-identify, h1 should now have certified addrs for h2
-	ids.IdentifyConn(h1t2c[0])
-	t.Log("test peer1 has peer2 certified addrs correctly")
-	testHasCertifiedAddrs(t, h1, h2p, h2.Peerstore().Addrs(h2p))
 }
