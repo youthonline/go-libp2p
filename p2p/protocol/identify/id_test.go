@@ -227,7 +227,7 @@ func getSignedRecord(t *testing.T, h host.Host, p peer.ID) *record.Envelope {
 // we're using BlankHost in our tests, which doesn't automatically generate peer records
 // and emit address change events on the bus like BasicHost.
 // This generates a record, puts it in the peerstore and emits an addr change event
-// will cause the identify service to push it to all peer it's connected to.
+// which will cause the identify service to push it to all peers it's connected to.
 func emitAddrChangeEvt(t *testing.T, h host.Host) {
 	t.Helper()
 
