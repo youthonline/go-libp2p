@@ -417,65 +417,6 @@ func (ids *IDService) handleIdentifyResponse(s network.Stream) {
 	ids.consumeMessage(&mes, c, protoSupportsPeerRecords(s.Protocol()))
 }
 
-func (ids *IDService) broadcast(protos []protocol.ID, payloadWriter func(s network.Stream)) {
-	var wg sync.WaitGroup
-
-	protoStrs := protocol.ConvertToStrings(protos)
-	ctx, cancel := context.WithTimeout(ids.ctx, 30*time.Second)
-	ctx = network.WithNoDial(ctx, protoStrs[0])
-
-	pstore := ids.Host.Peerstore()
-	for _, p := range ids.Host.Network().Peers() {
-		wg.Add(1)
-
-		go func(p peer.ID, conns []network.Conn) {
-			defer wg.Done()
-
-			// Wait till identify completes so we can check the
-			// supported protocols.
-			for _, c := range conns {
-				select {
-				case <-ids.IdentifyWait(c):
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			// avoid the unnecessary stream if the peer does not support the protocol.
-			if sup, err := pstore.SupportsProtocols(p, protoStrs...); err != nil && len(sup) == 0 {
-				// the peer does not support the required protocol.
-				return
-			}
-			// if the peerstore query errors, we go ahead anyway.
-
-			s, err := ids.Host.NewStream(ctx, p, protos...)
-			if err != nil {
-				log.Debugf("error opening push stream to %s: %s", p, err.Error())
-				return
-			}
-
-			rch := make(chan struct{}, 1)
-			go func() {
-				payloadWriter(s)
-				rch <- struct{}{}
-			}()
-
-			select {
-			case <-rch:
-			case <-ctx.Done():
-				// this is taking too long, abort!
-				s.Reset()
-			}
-		}(p, ids.Host.Network().ConnsToPeer(p))
-	}
-
-	// this supervisory goroutine is necessary to cancel the context
-	go func() {
-		wg.Wait()
-		cancel()
-	}()
-}
-
 func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn, usePeerRecords bool) {
 	// set protocols this node is currently handling
 	protos := ids.Host.Mux().Protocols()
