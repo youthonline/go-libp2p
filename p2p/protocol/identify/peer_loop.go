@@ -70,13 +70,13 @@ func (ph *peerHandler) loop() {
 		select {
 		// our listen addresses have changed, send an IDPush.
 		case <-ph.pushCh:
-			dp, err := ph.openStream([]string{IDPush, LegacyIDPush})
+			dp, err := ph.openStream([]string{IDPush})
 			if err != nil {
 				continue
 			}
 
 			mes := &pb.Identify{}
-			ph.ids.populateMessage(mes, dp.Conn(), protoSupportsPeerRecords(dp.Protocol()))
+			ph.ids.populateMessage(mes, dp.Conn())
 
 			ph.msgMu.Lock()
 			ph.idMsgSnapshot = mes
