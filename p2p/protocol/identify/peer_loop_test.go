@@ -28,13 +28,7 @@ func TestMakeApplyDelta(t *testing.T) {
 	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
 	defer h1.Close()
 	ids1 := NewIDService(h1)
-	ph := newPeerHandler(h1.ID(), ids1)
-	require.Nil(t, ph.mkDelta())
-
-	// set id to empty
-	doeval(t, ph, func() {
-		ph.lastIdMsgSent = &pb.Identify{}
-	})
+	ph := newPeerHandler(h1.ID(), ids1, &pb.Identify{})
 
 	m1 := ph.mkDelta()
 	require.NotNil(t, m1)
@@ -89,7 +83,7 @@ func TestHandlerClose(t *testing.T) {
 	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
 	defer h1.Close()
 	ids1 := NewIDService(h1)
-	ph := newPeerHandler(h1.ID(), ids1)
+	ph := newPeerHandler(h1.ID(), ids1, nil)
 
 	require.NoError(t, ph.close())
 }

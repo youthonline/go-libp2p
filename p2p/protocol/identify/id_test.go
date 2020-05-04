@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-eventbus"
+	libp2p "github.com/libp2p/go-libp2p"
 	ic "github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/event"
 	"github.com/libp2p/go-libp2p-core/helpers"
@@ -17,19 +19,14 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-libp2p-core/protocol"
-	"github.com/libp2p/go-libp2p-core/record"
 	coretest "github.com/libp2p/go-libp2p-core/test"
 
-	"github.com/libp2p/go-eventbus"
-	libp2p "github.com/libp2p/go-libp2p"
 	blhost "github.com/libp2p/go-libp2p-blankhost"
-	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
-	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
-	pb "github.com/libp2p/go-libp2p/p2p/protocol/identify/pb"
 
-	ggio "github.com/gogo/protobuf/io"
+	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
+	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/require"
 )
@@ -216,49 +213,6 @@ func testHasPublicKey(t *testing.T, h host.Host, p peer.ID, shouldBe ic.PubKey) 
 		t.Error("could not make key")
 	} else if p != p2 {
 		t.Error("key does not match peerid")
-	}
-}
-
-func getSignedRecord(t *testing.T, h host.Host, p peer.ID) *record.Envelope {
-	cab, ok := peerstore.GetCertifiedAddrBook(h.Peerstore())
-	require.True(t, ok)
-	rec := cab.GetPeerRecord(p)
-	return rec
-}
-
-// we're using BlankHost in our tests, which doesn't automatically generate peer records
-// and emit address change events on the bus like BasicHost.
-// This generates a record, puts it in the peerstore and emits an addr change event
-// which will cause the identify service to push it to all peers it's connected to.
-func emitAddrChangeEvt(t *testing.T, h host.Host) {
-	t.Helper()
-
-	key := h.Peerstore().PrivKey(h.ID())
-	if key == nil {
-		t.Fatal("no private key for host")
-	}
-
-	rec := peer.NewPeerRecord()
-	rec.PeerID = h.ID()
-	rec.Addrs = h.Addrs()
-	signed, err := record.Seal(rec, key)
-	if err != nil {
-		t.Fatalf("error generating peer record: %s", err)
-	}
-
-	cab, ok := peerstore.GetCertifiedAddrBook(h.Peerstore())
-	require.True(t, ok)
-	_, err = cab.ConsumePeerRecord(signed, peerstore.PermanentAddrTTL)
-	require.NoError(t, err)
-
-	evt := event.EvtLocalAddressesUpdated{}
-	emitter, err := h.EventBus().Emitter(new(event.EvtLocalAddressesUpdated), eventbus.Stateful)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = emitter.Emit(evt)
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -521,12 +475,12 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 	block := make(chan struct{})
 	handler := func(s network.Stream) {
 		<-block
-		w := ggio.NewDelimitedWriter(s)
-		w.WriteMsg(&pb.Identify{Protocols: h1.Mux().Protocols()})
-		helpers.FullClose(s)
+		go helpers.FullClose(s)
 	}
 	h1.RemoveStreamHandler(identify.ID)
+	h1.RemoveStreamHandler(identify.LegacyID)
 	h1.SetStreamHandler(identify.ID, handler)
+	h1.SetStreamHandler(identify.LegacyID, handler)
 
 	// from h2 connect to h1.
 	if err := h2.Connect(ctx, peer.AddrInfo{ID: h1.ID(), Addrs: h1.Addrs()}); err != nil {
@@ -536,6 +490,7 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 	// from h2, identify h1.
 	conn := h2.Network().ConnsToPeer(h1.ID())[0]
 	go func() {
+		ids2.IdentifyConn(conn)
 		ids2.IdentifyConn(conn)
 	}()
 
@@ -567,88 +522,6 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out while waiting for an event for the protocol changes in h2")
 	}
-}
-
-func TestIdentifyPushOnAddrChange(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	h2 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-
-	h1p := h1.ID()
-	h2p := h2.ID()
-
-	ids1 := identify.NewIDService(h1)
-	ids2 := identify.NewIDService(h2)
-	defer ids1.Close()
-	defer ids2.Close()
-
-	testKnowsAddrs(t, h1, h2p, []ma.Multiaddr{}) // nothing
-	testKnowsAddrs(t, h2, h1p, []ma.Multiaddr{}) // nothing
-
-	h2pi := h2.Peerstore().PeerInfo(h2p)
-	require.NoError(t, h1.Connect(ctx, h2pi))
-	require.Len(t, h1.Network().ConnsToPeer(h2p), 1)
-	require.Len(t, h2.Network().ConnsToPeer(h1p), 1)
-
-	// wait for identify to complete and assert current addresses
-	ids1.IdentifyConn(h1.Network().ConnsToPeer(h2p)[0])
-	ids2.IdentifyConn(h2.Network().ConnsToPeer(h1p)[0])
-
-	testKnowsAddrs(t, h1, h2p, h2.Peerstore().Addrs(h2p))
-	testKnowsAddrs(t, h2, h1p, h1.Peerstore().Addrs(h1p))
-
-	// change addr on host 1 and ensure host2 gets a push
-	lad := ma.StringCast("/ip4/127.0.0.1/tcp/1234")
-	require.NoError(t, h1.Network().Listen(lad))
-	require.Contains(t, h1.Addrs(), lad)
-	emitAddrChangeEvt(t, h1)
-
-	require.Eventually(t, func() bool {
-		addrs := h2.Peerstore().Addrs(h1p)
-		for _, ad := range addrs {
-			if ad.Equal(lad) {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 500*time.Millisecond)
-	require.NotNil(t, getSignedRecord(t, h2, h1p))
-
-	// change addr on host2 and ensure host 1 gets a pus
-	lad = ma.StringCast("/ip4/127.0.0.1/tcp/1235")
-	require.NoError(t, h2.Network().Listen(lad))
-	require.Contains(t, h2.Addrs(), lad)
-	emitAddrChangeEvt(t, h2)
-
-	require.Eventually(t, func() bool {
-		addrs := h1.Peerstore().Addrs(h2p)
-		for _, ad := range addrs {
-			if ad.Equal(lad) {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 500*time.Millisecond)
-	require.NotNil(t, getSignedRecord(t, h1, h2p))
-
-	// change addr on host2 again
-	lad2 := ma.StringCast("/ip4/127.0.0.1/tcp/1236")
-	require.NoError(t, h2.Network().Listen(lad2))
-	require.Contains(t, h2.Addrs(), lad2)
-	emitAddrChangeEvt(t, h2)
-
-	require.Eventually(t, func() bool {
-		addrs := h1.Peerstore().Addrs(h2p)
-		for _, ad := range addrs {
-			if ad.Equal(lad2) {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 500*time.Millisecond)
-	require.NotNil(t, getSignedRecord(t, h1, h2p))
 }
 
 func TestUserAgent(t *testing.T) {
@@ -686,55 +559,4 @@ func TestUserAgent(t *testing.T) {
 	if ver, ok := av.(string); !ok || ver != "bar" {
 		t.Errorf("expected agent version %q, got %q", "bar", av)
 	}
-}
-
-func TestSendPushIfDeltaNotSupported(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	h2 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
-	defer h2.Close()
-	defer h1.Close()
-
-	ids1 := identify.NewIDService(h1)
-	ids2 := identify.NewIDService(h2)
-	defer func() {
-		ids1.Close()
-		ids2.Close()
-	}()
-
-	err := h1.Connect(ctx, peer.AddrInfo{ID: h2.ID(), Addrs: h2.Addrs()})
-	require.NoError(t, err)
-
-	// wait for them to Identify each other
-	ids1.IdentifyConn(h1.Network().ConnsToPeer(h2.ID())[0])
-	ids2.IdentifyConn(h2.Network().ConnsToPeer(h1.ID())[0])
-
-	// h1 knows h2 speaks Delta
-	sup, err := h1.Peerstore().SupportsProtocols(h2.ID(), []string{identify.IDDelta}...)
-	require.NoError(t, err)
-	require.Equal(t, []string{identify.IDDelta}, sup)
-
-	// h2 stops supporting Delta and that information flows to h1
-	h2.RemoveStreamHandler(identify.IDDelta)
-
-	require.Eventually(t, func() bool {
-		sup, err := h1.Peerstore().SupportsProtocols(h2.ID(), []string{identify.IDDelta}...)
-		return err == nil && len(sup) == 0
-	}, 5*time.Second, 500*time.Millisecond)
-
-	// h1 starts listening on a new protocol and h2 finds out about that through a push
-	h1.SetStreamHandler("rand", func(network.Stream) {})
-	require.Eventually(t, func() bool {
-		sup, err := h2.Peerstore().SupportsProtocols(h1.ID(), []string{"rand"}...)
-		return err == nil && len(sup) == 1 && sup[0] == "rand"
-	}, 5*time.Second, 500*time.Millisecond)
-
-	// h1 stops listening on a protocol and h2 finds out about it via a push
-	h1.RemoveStreamHandler("rand")
-	require.Eventually(t, func() bool {
-		sup, err := h2.Peerstore().SupportsProtocols(h1.ID(), []string{"rand"}...)
-		return err == nil && len(sup) == 0
-	}, 5*time.Second, 500*time.Millisecond)
 }
