@@ -522,9 +522,7 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 		go helpers.FullClose(s)
 	}
 	h1.RemoveStreamHandler(identify.ID)
-	h1.RemoveStreamHandler(identify.LegacyID)
 	h1.SetStreamHandler(identify.ID, handler)
-	h1.SetStreamHandler(identify.LegacyID, handler)
 
 	// from h2 connect to h1.
 	if err := h2.Connect(ctx, peer.AddrInfo{ID: h1.ID(), Addrs: h1.Addrs()}); err != nil {

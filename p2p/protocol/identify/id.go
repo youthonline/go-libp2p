@@ -14,7 +14,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
-	"github.com/libp2p/go-libp2p-core/protocol"
 	"github.com/libp2p/go-libp2p-core/record"
 
 	"github.com/libp2p/go-eventbus"
@@ -29,12 +28,9 @@ import (
 
 var log = logging.Logger("net/identify")
 
-// ID is the protocol.ID of the Identify Service.
-const ID = "/p2p/id/1.1.0"
-
-// LegacyID is the protocol.ID of version 1.0.0 of the identify
-// service, which does not support signed peer records.
-const LegacyID = "/ipfs/id/1.0.0"
+// ID is the protocol.ID of version 1.0.0 of the identify
+// service.
+const ID = "/ipfs/id/1.0.0"
 
 // LibP2PVersion holds the current protocol version for a client running this code
 // TODO(jbenet): fix the versioning mess.
@@ -158,10 +154,6 @@ func NewIDService(h host.Host, opts ...Option) *IDService {
 
 	// register protocols that do not depend on peer records.
 	h.SetStreamHandler(IDDelta, s.deltaHandler)
-	h.SetStreamHandler(LegacyID, s.sendIdentifyResp)
-	h.SetStreamHandler(LegacyIDPush, s.pushHandler)
-
-	// register protocols that depend on peer records.
 	h.SetStreamHandler(ID, s.sendIdentifyResp)
 	h.SetStreamHandler(IDPush, s.pushHandler)
 
@@ -201,7 +193,7 @@ func (ids *IDService) loop() {
 
 			if ids.Host.Network().Connectedness(rp) == network.Connected {
 				mes := &pb.Identify{}
-				ids.populateMessage(mes, addReq.s.Conn(), protoSupportsPeerRecords(addReq.s.Protocol()))
+				ids.populateMessage(mes, addReq.s.Conn())
 				ph = newPeerHandler(rp, ids, mes)
 				phs[rp] = ph
 				addReq.resp <- ph
@@ -351,21 +343,15 @@ func (ids *IDService) identifyConn(c network.Conn, signal chan struct{}) {
 		ids.removeConn(c)
 		return
 	}
+	s.SetProtocol(ID)
 
-	protocolIDs := []string{ID, LegacyID}
 	// ok give the response to our handler.
-	var selectedProto string
-	if selectedProto, err = msmux.SelectOneOf(protocolIDs, s); err != nil {
+	if err = msmux.SelectProtoOrFail(ID, s); err != nil {
 		log.Event(context.TODO(), "IdentifyOpenFailed", c.RemotePeer(), logging.Metadata{"error": err})
 		s.Reset()
 		return
 	}
-	s.SetProtocol(protocol.ID(selectedProto))
 	ids.handleIdentifyResponse(s)
-}
-
-func protoSupportsPeerRecords(proto protocol.ID) bool {
-	return proto == ID || proto == IDPush
 }
 
 func (ids *IDService) sendIdentifyResp(s network.Stream) {
@@ -414,10 +400,10 @@ func (ids *IDService) handleIdentifyResponse(s network.Stream) {
 	defer func() { go helpers.FullClose(s) }()
 
 	log.Debugf("%s received message from %s %s", s.Protocol(), c.RemotePeer(), c.RemoteMultiaddr())
-	ids.consumeMessage(&mes, c, protoSupportsPeerRecords(s.Protocol()))
+	ids.consumeMessage(&mes, c)
 }
 
-func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn, usePeerRecords bool) {
+func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn) {
 	// set protocols this node is currently handling
 	protos := ids.Host.Mux().Protocols()
 	mes.Protocols = make([]string, len(protos))
@@ -429,13 +415,24 @@ func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn, usePeerR
 	// "public" address, at least in relation to us.
 	mes.ObservedAddr = c.RemoteMultiaddr().Bytes()
 
-	if usePeerRecords {
-		var rec *record.Envelope
-		cab, ok := peerstore.GetCertifiedAddrBook(ids.Host.Peerstore())
-		if ok {
-			rec = cab.GetPeerRecord(ids.Host.ID())
+	// populate unsigned addresses.
+	// peers that do not yet support signed addresses will need this.
+	// set listen addrs, get our latest addrs from Host.
+	laddrs := ids.Host.Addrs()
+	// Note: LocalMultiaddr is sometimes 0.0.0.0
+	viaLoopback := manet.IsIPLoopback(c.LocalMultiaddr()) || manet.IsIPLoopback(c.RemoteMultiaddr())
+	mes.ListenAddrs = make([][]byte, 0, len(laddrs))
+	for _, addr := range laddrs {
+		if !viaLoopback && manet.IsIPLoopback(addr) {
+			continue
 		}
+		mes.ListenAddrs = append(mes.ListenAddrs, addr.Bytes())
+	}
 
+	// populate signed record.
+	cab, ok := peerstore.GetCertifiedAddrBook(ids.Host.Peerstore())
+	if ok {
+		rec := cab.GetPeerRecord(ids.Host.ID())
 		if rec == nil {
 			log.Errorf("latest peer record does not exist. identify message incomplete!")
 		} else {
@@ -446,18 +443,6 @@ func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn, usePeerR
 				mes.SignedPeerRecord = recBytes
 				log.Debugf("%s sent peer record to %s", c.LocalPeer(), c.RemotePeer())
 			}
-		}
-	} else {
-		// set listen addrs, get our latest addrs from Host.
-		laddrs := ids.Host.Addrs()
-		// Note: LocalMultiaddr is sometimes 0.0.0.0
-		viaLoopback := manet.IsIPLoopback(c.LocalMultiaddr()) || manet.IsIPLoopback(c.RemoteMultiaddr())
-		mes.ListenAddrs = make([][]byte, 0, len(laddrs))
-		for _, addr := range laddrs {
-			if !viaLoopback && manet.IsIPLoopback(addr) {
-				continue
-			}
-			mes.ListenAddrs = append(mes.ListenAddrs, addr.Bytes())
 		}
 	}
 
@@ -489,7 +474,7 @@ func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn, usePeerR
 	mes.AgentVersion = &av
 }
 
-func (ids *IDService) consumeMessage(mes *pb.Identify, c network.Conn, usePeerRecords bool) {
+func (ids *IDService) consumeMessage(mes *pb.Identify, c network.Conn) {
 	p := c.RemotePeer()
 
 	// mes.Protocols
@@ -520,13 +505,11 @@ func (ids *IDService) consumeMessage(mes *pb.Identify, c network.Conn, usePeerRe
 	// many undialable addresses for other peers.
 
 	// add certified addresses for the peer, if they sent us a signed peer record
+	// otherwise use the unsigned addresses.
 	var signedPeerRecord *record.Envelope
-	if usePeerRecords {
-		var err error
-		signedPeerRecord, err = signedPeerRecordFromMessage(mes)
-		if err != nil {
-			log.Errorf("error getting peer record from Identify message: %v", err)
-		}
+	signedPeerRecord, err := signedPeerRecordFromMessage(mes)
+	if err != nil {
+		log.Errorf("error getting peer record from Identify message: %v", err)
 	}
 
 	// Extend the TTLs on the known (probably) good addresses.
