@@ -19,5 +19,5 @@ const LegacyIDPush = "/ipfs/id/push/1.0.0"
 
 // pushHandler handles incoming identify push streams. The behaviour is identical to the ordinary identify protocol.
 func (ids *IDService) pushHandler(s network.Stream) {
-	ids.responseHandler(s)
+	ids.handleIdentifyResponse(s)
 }

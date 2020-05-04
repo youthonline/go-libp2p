@@ -19,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-libp2p-core/protocol"
+	"github.com/libp2p/go-libp2p-core/record"
 	coretest "github.com/libp2p/go-libp2p-core/test"
 
 	blhost "github.com/libp2p/go-libp2p-blankhost"
@@ -213,6 +214,49 @@ func testHasPublicKey(t *testing.T, h host.Host, p peer.ID, shouldBe ic.PubKey) 
 		t.Error("could not make key")
 	} else if p != p2 {
 		t.Error("key does not match peerid")
+	}
+}
+
+func getSignedRecord(t *testing.T, h host.Host, p peer.ID) *record.Envelope {
+	cab, ok := peerstore.GetCertifiedAddrBook(h.Peerstore())
+	require.True(t, ok)
+	rec := cab.GetPeerRecord(p)
+	return rec
+}
+
+// we're using BlankHost in our tests, which doesn't automatically generate peer records
+// and emit address change events on the bus like BasicHost.
+// This generates a record, puts it in the peerstore and emits an addr change event
+// will cause the identify service to push it to all peer it's connected to.
+func emitAddrChangeEvt(t *testing.T, h host.Host) {
+	t.Helper()
+
+	key := h.Peerstore().PrivKey(h.ID())
+	if key == nil {
+		t.Fatal("no private key for host")
+	}
+
+	rec := peer.NewPeerRecord()
+	rec.PeerID = h.ID()
+	rec.Addrs = h.Addrs()
+	signed, err := record.Seal(rec, key)
+	if err != nil {
+		t.Fatalf("error generating peer record: %s", err)
+	}
+
+	cab, ok := peerstore.GetCertifiedAddrBook(h.Peerstore())
+	require.True(t, ok)
+	_, err = cab.ConsumePeerRecord(signed, peerstore.PermanentAddrTTL)
+	require.NoError(t, err)
+
+	evt := event.EvtLocalAddressesUpdated{}
+	emitter, err := h.EventBus().Emitter(new(event.EvtLocalAddressesUpdated), eventbus.Stateful)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = emitter.Emit(evt)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -522,6 +566,88 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out while waiting for an event for the protocol changes in h2")
 	}
+}
+
+func TestIdentifyPushOnAddrChange(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
+	h2 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
+
+	h1p := h1.ID()
+	h2p := h2.ID()
+
+	ids1 := identify.NewIDService(h1)
+	ids2 := identify.NewIDService(h2)
+	defer ids1.Close()
+	defer ids2.Close()
+
+	testKnowsAddrs(t, h1, h2p, []ma.Multiaddr{}) // nothing
+	testKnowsAddrs(t, h2, h1p, []ma.Multiaddr{}) // nothing
+
+	h2pi := h2.Peerstore().PeerInfo(h2p)
+	require.NoError(t, h1.Connect(ctx, h2pi))
+	require.Len(t, h1.Network().ConnsToPeer(h2p), 1)
+	require.Len(t, h2.Network().ConnsToPeer(h1p), 1)
+
+	// wait for identify to complete and assert current addresses
+	ids1.IdentifyConn(h1.Network().ConnsToPeer(h2p)[0])
+	ids2.IdentifyConn(h2.Network().ConnsToPeer(h1p)[0])
+
+	testKnowsAddrs(t, h1, h2p, h2.Peerstore().Addrs(h2p))
+	testKnowsAddrs(t, h2, h1p, h1.Peerstore().Addrs(h1p))
+
+	// change addr on host 1 and ensure host2 gets a push
+	lad := ma.StringCast("/ip4/127.0.0.1/tcp/1234")
+	require.NoError(t, h1.Network().Listen(lad))
+	require.Contains(t, h1.Addrs(), lad)
+	emitAddrChangeEvt(t, h1)
+
+	require.Eventually(t, func() bool {
+		addrs := h2.Peerstore().Addrs(h1p)
+		for _, ad := range addrs {
+			if ad.Equal(lad) {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 500*time.Millisecond)
+	require.NotNil(t, getSignedRecord(t, h2, h1p))
+
+	// change addr on host2 and ensure host 1 gets a pus
+	lad = ma.StringCast("/ip4/127.0.0.1/tcp/1235")
+	require.NoError(t, h2.Network().Listen(lad))
+	require.Contains(t, h2.Addrs(), lad)
+	emitAddrChangeEvt(t, h2)
+
+	require.Eventually(t, func() bool {
+		addrs := h1.Peerstore().Addrs(h2p)
+		for _, ad := range addrs {
+			if ad.Equal(lad) {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 500*time.Millisecond)
+	require.NotNil(t, getSignedRecord(t, h1, h2p))
+
+	// change addr on host2 again
+	lad2 := ma.StringCast("/ip4/127.0.0.1/tcp/1236")
+	require.NoError(t, h2.Network().Listen(lad2))
+	require.Contains(t, h2.Addrs(), lad2)
+	emitAddrChangeEvt(t, h2)
+
+	require.Eventually(t, func() bool {
+		addrs := h1.Peerstore().Addrs(h2p)
+		for _, ad := range addrs {
+			if ad.Equal(lad2) {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 500*time.Millisecond)
+	require.NotNil(t, getSignedRecord(t, h1, h2p))
 }
 
 func TestUserAgent(t *testing.T) {
