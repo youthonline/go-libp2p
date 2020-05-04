@@ -212,7 +212,7 @@ func (ids *IDService) loop() {
 			if ids.Host.Network().Connectedness(rp) != network.Connected {
 				// before we remove the peerhandler, we should ensure that it will not send any
 				// more messages. Otherwise, we might create a new handler and the Identify response
-				// synchronized with the new handler might be overwritten by a message sent by this handler.
+				// synchronized with the new handler might be overwritten by a message sent by this "old" handler.
 				ids.refCount.Add(1)
 				go func(req *rmPeerHandlerReq, ph *peerHandler) {
 					defer ids.refCount.Done()
@@ -361,7 +361,7 @@ func (ids *IDService) identifyConn(c network.Conn, signal chan struct{}) {
 		return
 	}
 	s.SetProtocol(protocol.ID(selectedProto))
-	ids.responseHandler(s)
+	ids.handleIdentifyResponse(s)
 }
 
 func protoSupportsPeerRecords(proto protocol.ID) bool {
@@ -400,7 +400,7 @@ func (ids *IDService) sendIdentifyResp(s network.Stream) {
 	log.Debugf("%s sent message to %s %s", ID, c.RemotePeer(), c.RemoteMultiaddr())
 }
 
-func (ids *IDService) responseHandler(s network.Stream) {
+func (ids *IDService) handleIdentifyResponse(s network.Stream) {
 	c := s.Conn()
 
 	r := ggio.NewDelimitedReader(s, 2048)

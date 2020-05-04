@@ -37,6 +37,9 @@ import (
 // peer (for all addresses).
 const maxAddressResolution = 32
 
+// addrChangeTickrInterval is the interval between two address change ticks.
+var addrChangeTickrInterval = 5 * time.Second
+
 var log = logging.Logger("basichost")
 
 var (
@@ -403,7 +406,7 @@ func (h *BasicHost) background() {
 
 	// periodically schedules an IdentifyPush to update our peers for changes
 	// in our address set (if needed)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(addrChangeTickrInterval)
 	defer ticker.Stop()
 
 	for {
