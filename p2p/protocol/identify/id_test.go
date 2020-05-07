@@ -23,15 +23,15 @@ import (
 	"github.com/libp2p/go-eventbus"
 	libp2p "github.com/libp2p/go-libp2p"
 	blhost "github.com/libp2p/go-libp2p-blankhost"
+	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
+	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 	pb "github.com/libp2p/go-libp2p/p2p/protocol/identify/pb"
 
-	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
-	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
+	ggio "github.com/gogo/protobuf/io"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/require"
-	ggio "github.com/gogo/protobuf/io"
 )
 
 func subtestIDService(t *testing.T) {
