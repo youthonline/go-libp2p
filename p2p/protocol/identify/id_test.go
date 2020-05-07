@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/libp2p/go-eventbus"
-	libp2p "github.com/libp2p/go-libp2p"
 	ic "github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/event"
 	"github.com/libp2p/go-libp2p-core/helpers"
@@ -22,14 +20,18 @@ import (
 	"github.com/libp2p/go-libp2p-core/record"
 	coretest "github.com/libp2p/go-libp2p-core/test"
 
+	"github.com/libp2p/go-eventbus"
+	libp2p "github.com/libp2p/go-libp2p"
 	blhost "github.com/libp2p/go-libp2p-blankhost"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
 	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
+	pb "github.com/libp2p/go-libp2p/p2p/protocol/identify/pb"
 
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/require"
+	ggio "github.com/gogo/protobuf/io"
 )
 
 func subtestIDService(t *testing.T) {
@@ -519,7 +521,9 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 	block := make(chan struct{})
 	handler := func(s network.Stream) {
 		<-block
-		go helpers.FullClose(s)
+		w := ggio.NewDelimitedWriter(s)
+		w.WriteMsg(&pb.Identify{Protocols: h1.Mux().Protocols()})
+		helpers.FullClose(s)
 	}
 	h1.RemoveStreamHandler(identify.ID)
 	h1.SetStreamHandler(identify.ID, handler)
@@ -532,7 +536,6 @@ func TestIdentifyDeltaWhileIdentifyingConn(t *testing.T) {
 	// from h2, identify h1.
 	conn := h2.Network().ConnsToPeer(h1.ID())[0]
 	go func() {
-		ids2.IdentifyConn(conn)
 		ids2.IdentifyConn(conn)
 	}()
 
@@ -683,4 +686,55 @@ func TestUserAgent(t *testing.T) {
 	if ver, ok := av.(string); !ok || ver != "bar" {
 		t.Errorf("expected agent version %q, got %q", "bar", av)
 	}
+}
+
+func TestSendPushIfDeltaNotSupported(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
+	h2 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
+	defer h2.Close()
+	defer h1.Close()
+
+	ids1 := identify.NewIDService(h1)
+	ids2 := identify.NewIDService(h2)
+	defer func() {
+		ids1.Close()
+		ids2.Close()
+	}()
+
+	err := h1.Connect(ctx, peer.AddrInfo{ID: h2.ID(), Addrs: h2.Addrs()})
+	require.NoError(t, err)
+
+	// wait for them to Identify each other
+	ids1.IdentifyConn(h1.Network().ConnsToPeer(h2.ID())[0])
+	ids2.IdentifyConn(h2.Network().ConnsToPeer(h1.ID())[0])
+
+	// h1 knows h2 speaks Delta
+	sup, err := h1.Peerstore().SupportsProtocols(h2.ID(), []string{identify.IDDelta}...)
+	require.NoError(t, err)
+	require.Equal(t, []string{identify.IDDelta}, sup)
+
+	// h2 stops supporting Delta and that information flows to h1
+	h2.RemoveStreamHandler(identify.IDDelta)
+
+	require.Eventually(t, func() bool {
+		sup, err := h1.Peerstore().SupportsProtocols(h2.ID(), []string{identify.IDDelta}...)
+		return err == nil && len(sup) == 0
+	}, 5*time.Second, 500*time.Millisecond)
+
+	// h1 starts listening on a new protocol and h2 finds out about that through a push
+	h1.SetStreamHandler("rand", func(network.Stream) {})
+	require.Eventually(t, func() bool {
+		sup, err := h2.Peerstore().SupportsProtocols(h1.ID(), []string{"rand"}...)
+		return err == nil && len(sup) == 1 && sup[0] == "rand"
+	}, 5*time.Second, 500*time.Millisecond)
+
+	// h1 stops listening on a protocol and h2 finds out about it via a push
+	h1.RemoveStreamHandler("rand")
+	require.Eventually(t, func() bool {
+		sup, err := h2.Peerstore().SupportsProtocols(h1.ID(), []string{"rand"}...)
+		return err == nil && len(sup) == 0
+	}, 5*time.Second, 500*time.Millisecond)
 }

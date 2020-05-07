@@ -3,6 +3,7 @@ package identify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 )
 
 var errProtocolNotSupported = errors.New("protocol not supported")
+var isTesting = false
 
 type peerHandler struct {
 	ids *IDService
@@ -46,9 +48,12 @@ func newPeerHandler(pid peer.ID, ids *IDService, initState *pb.Identify) *peerHa
 
 		idMsgSnapshot: initState,
 
-		pushCh:     make(chan struct{}, 1),
-		deltaCh:    make(chan struct{}, 1),
-		evalTestCh: make(chan func()),
+		pushCh:  make(chan struct{}, 1),
+		deltaCh: make(chan struct{}, 1),
+	}
+
+	if isTesting {
+		ph.evalTestCh = make(chan func())
 	}
 
 	ph.wg.Add(1)
@@ -70,37 +75,14 @@ func (ph *peerHandler) loop() {
 		select {
 		// our listen addresses have changed, send an IDPush.
 		case <-ph.pushCh:
-			dp, err := ph.openStream([]string{IDPush})
-			if err != nil {
-				continue
+			if err := ph.sendPush(); err != nil {
+				log.Warnw("failed to send Identify Push", "peer", ph.pid, "error", err)
 			}
-
-			mes := &pb.Identify{}
-			ph.ids.populateMessage(mes, dp.Conn())
-
-			ph.msgMu.Lock()
-			ph.idMsgSnapshot = mes
-			ph.msgMu.Unlock()
-
-			ph.sendMessage(dp, mes)
 
 		case <-ph.deltaCh:
-			mes := ph.mkDelta()
-			if mes == nil || (len(mes.AddedProtocols) == 0 && len(mes.RmProtocols) == 0) {
-				continue
+			if err := ph.sendDelta(); err != nil {
+				log.Warnw("failed to send Identify Delta", "peer", ph.pid, "error", err)
 			}
-
-			ph.msgMu.Lock()
-			// update our identify snapshot for this peer by applying the delta to it
-			ph.applyDelta(mes)
-			ph.msgMu.Unlock()
-
-			ds, err := ph.openStream([]string{IDDelta})
-			if err != nil {
-				continue
-			}
-
-			ph.sendMessage(ds, &pb.Identify{Delta: mes})
 
 		case fnc := <-ph.evalTestCh:
 			fnc()
@@ -109,6 +91,61 @@ func (ph *peerHandler) loop() {
 			return
 		}
 	}
+}
+
+func (ph *peerHandler) sendDelta() error {
+	mes := ph.mkDelta()
+	if mes == nil || (len(mes.AddedProtocols) == 0 && len(mes.RmProtocols) == 0) {
+		return nil
+	}
+
+	// send a push if the peer does not support the Delta protocol.
+	if !ph.peerSupportsProtos([]string{IDDelta}) {
+		log.Debugw("will send push as peer does not support delta", "peer", ph.pid)
+		if err := ph.sendPush(); err != nil {
+			return fmt.Errorf("failed to send push on delta message: %w", err)
+		}
+		return nil
+	}
+
+	ph.msgMu.Lock()
+	// update our identify snapshot for this peer by applying the delta to it
+	ph.applyDelta(mes)
+	ph.msgMu.Unlock()
+
+	ds, err := ph.openStream([]string{IDDelta})
+	if err != nil {
+		return fmt.Errorf("failed to open delta stream: %w", err)
+	}
+
+	if err := ph.sendMessage(ds, &pb.Identify{Delta: mes}); err != nil {
+		return fmt.Errorf("failed to send delta message, %w", err)
+	}
+	return nil
+}
+
+func (ph *peerHandler) sendPush() error {
+	dp, err := ph.openStream([]string{IDPush})
+	if err == errProtocolNotSupported {
+		log.Debugw("not sending push as peer does not support protocol", "peer", ph.pid)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to open push stream: %w", err)
+	}
+
+	conn := dp.Conn()
+	mes := &pb.Identify{}
+	ph.ids.populateMessage(mes, ph.pid, conn.LocalMultiaddr(), conn.RemoteMultiaddr())
+
+	ph.msgMu.Lock()
+	ph.idMsgSnapshot = mes
+	ph.msgMu.Unlock()
+
+	if err := ph.sendMessage(dp, mes); err != nil {
+		return fmt.Errorf("failed to send push message: %w", err)
+	}
+	return nil
 }
 
 func (ph *peerHandler) applyDelta(mes *pb.Delta) {
@@ -138,8 +175,8 @@ func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
 			return nil, ph.ctx.Err()
 		}
 	}
-	pstore := ph.ids.Host.Peerstore()
-	if sup, err := pstore.SupportsProtocols(ph.pid, protos...); err != nil && len(sup) == 0 {
+
+	if !ph.peerSupportsProtos(protos) {
 		return nil, errProtocolNotSupported
 	}
 
@@ -152,11 +189,29 @@ func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
 	// the list of protocols passed to it.
 	s, err := ph.ids.Host.NewStream(ctx, ph.pid, protocol.ConvertFromStrings(protos)...)
 	if err != nil {
-		log.Warnf("failed to open %s stream with peer %s, err=%s", protos, ph.pid.Pretty(), err)
 		return nil, err
 	}
 
 	return s, err
+}
+
+// returns true if the peer supports atleast one of the given protocols
+func (ph *peerHandler) peerSupportsProtos(protos []string) bool {
+	conns := ph.ids.Host.Network().ConnsToPeer(ph.pid)
+	for _, c := range conns {
+		select {
+		case <-ph.ids.IdentifyWait(c):
+		case <-ph.ctx.Done():
+			return false
+		}
+	}
+
+	pstore := ph.ids.Host.Peerstore()
+
+	if sup, err := pstore.SupportsProtocols(ph.pid, protos...); err == nil && len(sup) == 0 {
+		return false
+	}
+	return true
 }
 
 func (ph *peerHandler) mkDelta() *pb.Delta {
@@ -166,12 +221,12 @@ func (ph *peerHandler) mkDelta() *pb.Delta {
 	oldProtos := make(map[string]struct{}, len(old))
 	currProtos := make(map[string]struct{}, len(curr))
 
-	for i := range old {
-		oldProtos[old[i]] = struct{}{}
+	for _, proto := range old {
+		oldProtos[proto] = struct{}{}
 	}
 
-	for i := range curr {
-		currProtos[curr[i]] = struct{}{}
+	for _, proto := range curr {
+		currProtos[proto] = struct{}{}
 	}
 
 	var added []string
@@ -201,9 +256,10 @@ func (ph *peerHandler) sendMessage(s network.Stream, mes *pb.Identify) error {
 	defer helpers.FullClose(s)
 	c := s.Conn()
 	if err := ggio.NewDelimitedWriter(s).WriteMsg(mes); err != nil {
-		log.Warnf("error while sending %s update to %s: err=%s", s.Protocol(), c.RemotePeer(), err)
 		return err
+
 	}
-	log.Debugf("sent %s update to %s: %s", s.Protocol(), c.RemotePeer(), c.RemoteMultiaddr())
+	log.Debugw("sent identify update", "protocol", s.Protocol(), "peer", c.RemotePeer(),
+		"peer address", c.RemoteMultiaddr())
 	return nil
 }

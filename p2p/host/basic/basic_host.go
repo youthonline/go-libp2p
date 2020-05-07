@@ -215,10 +215,10 @@ func NewHost(ctx context.Context, net network.Network, opts *HostOpts) (*BasicHo
 	rec := peer.PeerRecordFromAddrInfo(peer.AddrInfo{h.ID(), h.Addrs()})
 	ev, err := record.Seal(rec, h.signKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signed record for self, err=%s", err)
+		return nil, fmt.Errorf("failed to create signed record for self: %w", err)
 	}
 	if _, err := cab.ConsumePeerRecord(ev, peerstore.PermanentAddrTTL); err != nil {
-		return nil, fmt.Errorf("failed to persist signed record to peerstore, err=%s", err)
+		return nil, fmt.Errorf("failed to persist signed record to peerstore: %w", err)
 	}
 
 	return h, nil

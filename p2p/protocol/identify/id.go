@@ -60,8 +60,10 @@ func init() {
 const transientTTL = 10 * time.Second
 
 type addPeerHandlerReq struct {
-	s    network.Stream
-	resp chan *peerHandler
+	rp             peer.ID
+	localConnAddr  ma.Multiaddr
+	remoteConnAddr ma.Multiaddr
+	resp           chan *peerHandler
 }
 
 type rmPeerHandlerReq struct {
@@ -102,8 +104,8 @@ type IDService struct {
 		evtPeerIdentificationFailed    event.Emitter
 	}
 
-	addPeerHandlerCh chan *addPeerHandlerReq
-	rmPeerHandlerCh  chan *rmPeerHandlerReq
+	addPeerHandlerCh chan addPeerHandlerReq
+	rmPeerHandlerCh  chan rmPeerHandlerReq
 }
 
 // NewIDService constructs a new *IDService and activates it by
@@ -129,8 +131,8 @@ func NewIDService(h host.Host, opts ...Option) *IDService {
 		conns:         make(map[network.Conn]chan struct{}),
 		observedAddrs: NewObservedAddrManager(hostCtx, h),
 
-		addPeerHandlerCh: make(chan *addPeerHandlerReq),
-		rmPeerHandlerCh:  make(chan *rmPeerHandlerReq),
+		addPeerHandlerCh: make(chan addPeerHandlerReq),
+		rmPeerHandlerCh:  make(chan rmPeerHandlerReq),
 	}
 
 	// handle local protocol handler updates, and push deltas to peers.
@@ -184,7 +186,7 @@ func (ids *IDService) loop() {
 	for {
 		select {
 		case addReq := <-ids.addPeerHandlerCh:
-			rp := addReq.s.Conn().RemotePeer()
+			rp := addReq.rp
 			ph, ok := phs[rp]
 			if ok {
 				addReq.resp <- ph
@@ -193,7 +195,7 @@ func (ids *IDService) loop() {
 
 			if ids.Host.Network().Connectedness(rp) == network.Connected {
 				mes := &pb.Identify{}
-				ids.populateMessage(mes, addReq.s.Conn())
+				ids.populateMessage(mes, rp, addReq.localConnAddr, addReq.remoteConnAddr)
 				ph = newPeerHandler(rp, ids, mes)
 				phs[rp] = ph
 				addReq.resp <- ph
@@ -205,22 +207,39 @@ func (ids *IDService) loop() {
 				// before we remove the peerhandler, we should ensure that it will not send any
 				// more messages. Otherwise, we might create a new handler and the Identify response
 				// synchronized with the new handler might be overwritten by a message sent by this "old" handler.
+				ph, ok := phs[rp]
+				if !ok {
+					// move on, move on, there's nothing to see here.
+					continue
+				}
 				ids.refCount.Add(1)
-				go func(req *rmPeerHandlerReq, ph *peerHandler) {
+				go func(req rmPeerHandlerReq, ph *peerHandler) {
 					defer ids.refCount.Done()
-					if ph != nil {
-						ph.close()
-						select {
-						case <-ids.ctx.Done():
-							return
-						case phClosedCh <- req.p:
-						}
+					ph.close()
+					select {
+					case <-ids.ctx.Done():
+						return
+					case phClosedCh <- req.p:
 					}
-				}(rmReq, phs[rp])
+				}(rmReq, ph)
 			}
 
-		case p := <-phClosedCh:
-			delete(phs, p)
+		case rp := <-phClosedCh:
+			ph := phs[rp]
+			delete(phs, rp)
+
+			// If we are connected to the peer, it means that we got a connection from the peer
+			// before we could finish removing it's handler on the previous disconnection.
+			// If we delete the handler and dont replace it, we wont be able to push updates to it
+			// till we see a new connection. So, create and register a new handler for it with the state
+			// initialised to the last message we sent to that peer.
+			if ids.Host.Network().Connectedness(rp) == network.Connected {
+				ph.msgMu.RLock()
+				mes := ph.idMsgSnapshot
+				ph.msgMu.RUnlock()
+				ph = nil
+				phs[rp] = newPeerHandler(rp, ids, mes)
+			}
 
 		case e, more := <-sub.Out():
 			if !more {
@@ -368,7 +387,8 @@ func (ids *IDService) sendIdentifyResp(s network.Stream) {
 
 	phCh := make(chan *peerHandler, 1)
 	select {
-	case ids.addPeerHandlerCh <- &addPeerHandlerReq{s, phCh}:
+	case ids.addPeerHandlerCh <- addPeerHandlerReq{c.RemotePeer(), c.LocalMultiaddr(),
+		c.RemoteMultiaddr(), phCh}:
 	case <-ids.ctx.Done():
 		return
 	}
@@ -403,7 +423,7 @@ func (ids *IDService) handleIdentifyResponse(s network.Stream) {
 	ids.consumeMessage(&mes, c)
 }
 
-func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn) {
+func (ids *IDService) populateMessage(mes *pb.Identify, rp peer.ID, localAddr, remoteAddr ma.Multiaddr) {
 	// set protocols this node is currently handling
 	protos := ids.Host.Mux().Protocols()
 	mes.Protocols = make([]string, len(protos))
@@ -413,14 +433,14 @@ func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn) {
 
 	// observed address so other side is informed of their
 	// "public" address, at least in relation to us.
-	mes.ObservedAddr = c.RemoteMultiaddr().Bytes()
+	mes.ObservedAddr = remoteAddr.Bytes()
 
 	// populate unsigned addresses.
 	// peers that do not yet support signed addresses will need this.
 	// set listen addrs, get our latest addrs from Host.
 	laddrs := ids.Host.Addrs()
 	// Note: LocalMultiaddr is sometimes 0.0.0.0
-	viaLoopback := manet.IsIPLoopback(c.LocalMultiaddr()) || manet.IsIPLoopback(c.RemoteMultiaddr())
+	viaLoopback := manet.IsIPLoopback(localAddr) || manet.IsIPLoopback(remoteAddr)
 	mes.ListenAddrs = make([][]byte, 0, len(laddrs))
 	for _, addr := range laddrs {
 		if !viaLoopback && manet.IsIPLoopback(addr) {
@@ -441,7 +461,7 @@ func (ids *IDService) populateMessage(mes *pb.Identify, c network.Conn) {
 				log.Errorf("error marshaling peer record: %v", err)
 			} else {
 				mes.SignedPeerRecord = recBytes
-				log.Debugf("%s sent peer record to %s", c.LocalPeer(), c.RemotePeer())
+				log.Debugf("%s sent peer record to %s", ids.Host.ID(), rp)
 			}
 		}
 	}
@@ -707,7 +727,7 @@ func (nn *netNotifiee) Disconnected(n network.Network, v network.Conn) {
 	if ids.Host.Network().Connectedness(v.RemotePeer()) != network.Connected {
 		// consider removing the peer handler for this
 		select {
-		case ids.rmPeerHandlerCh <- &rmPeerHandlerReq{v.RemotePeer()}:
+		case ids.rmPeerHandlerCh <- rmPeerHandlerReq{v.RemotePeer()}:
 		case <-ids.ctx.Done():
 			return
 		}
