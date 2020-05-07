@@ -2,8 +2,10 @@ package identify
 
 import (
 	"context"
-	"github.com/libp2p/go-libp2p-core/network"
 	"testing"
+
+	"github.com/libp2p/go-libp2p-core/network"
+	"github.com/libp2p/go-libp2p-core/peer"
 
 	blhost "github.com/libp2p/go-libp2p-blankhost"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
@@ -22,6 +24,7 @@ func doeval(t *testing.T, ph *peerHandler, f func()) {
 }
 
 func TestMakeApplyDelta(t *testing.T) {
+	isTesting = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -77,6 +80,7 @@ func TestMakeApplyDelta(t *testing.T) {
 }
 
 func TestHandlerClose(t *testing.T) {
+	isTesting = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -86,4 +90,23 @@ func TestHandlerClose(t *testing.T) {
 	ph := newPeerHandler(h1.ID(), ids1, nil)
 
 	require.NoError(t, ph.close())
+}
+
+func TestPeerSupportsProto(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h1 := blhost.NewBlankHost(swarmt.GenSwarm(t, ctx))
+	defer h1.Close()
+	ids1 := NewIDService(h1)
+
+	rp := peer.ID("test")
+	ph := newPeerHandler(rp, ids1, nil)
+	require.NoError(t, h1.Peerstore().AddProtocols(rp, "test"))
+	require.True(t, ph.peerSupportsProtos([]string{"test"}))
+	require.False(t, ph.peerSupportsProtos([]string{"random"}))
+
+	// remove support for protocol and check
+	require.NoError(t, h1.Peerstore().RemoveProtocols(rp, "test"))
+	require.False(t, ph.peerSupportsProtos([]string{"test"}))
 }

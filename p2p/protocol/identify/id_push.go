@@ -9,7 +9,7 @@ import (
 //
 // It is in the process of being replaced by identify delta, which sends only diffs for better
 // resource utilisation.
-const IDPush = "/p2p/id/push/1.0.0"
+const IDPush = "/ipfs/id/push/1.0.0"
 
 // pushHandler handles incoming identify push streams. The behaviour is identical to the ordinary identify protocol.
 func (ids *IDService) pushHandler(s network.Stream) {
