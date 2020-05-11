@@ -38,13 +38,9 @@ type peerHandler struct {
 }
 
 func newPeerHandler(pid peer.ID, ids *IDService, initState *pb.Identify) *peerHandler {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	ph := &peerHandler{
-		ids:    ids,
-		ctx:    ctx,
-		cancel: cancel,
-		pid:    pid,
+		ids: ids,
+		pid: pid,
 
 		idMsgSnapshot: initState,
 
@@ -56,9 +52,16 @@ func newPeerHandler(pid peer.ID, ids *IDService, initState *pb.Identify) *peerHa
 		ph.evalTestCh = make(chan func())
 	}
 
+	return ph
+}
+
+func (ph *peerHandler) start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	ph.ctx = ctx
+	ph.cancel = cancel
+
 	ph.wg.Add(1)
 	go ph.loop()
-	return ph
 }
 
 func (ph *peerHandler) close() error {

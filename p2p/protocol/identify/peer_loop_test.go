@@ -32,6 +32,8 @@ func TestMakeApplyDelta(t *testing.T) {
 	defer h1.Close()
 	ids1 := NewIDService(h1)
 	ph := newPeerHandler(h1.ID(), ids1, &pb.Identify{})
+	ph.start()
+	defer ph.close()
 
 	m1 := ph.mkDelta()
 	require.NotNil(t, m1)
@@ -88,6 +90,7 @@ func TestHandlerClose(t *testing.T) {
 	defer h1.Close()
 	ids1 := NewIDService(h1)
 	ph := newPeerHandler(h1.ID(), ids1, nil)
+	ph.start()
 
 	require.NoError(t, ph.close())
 }

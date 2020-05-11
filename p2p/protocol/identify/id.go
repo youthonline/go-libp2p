@@ -197,6 +197,7 @@ func (ids *IDService) loop() {
 				mes := &pb.Identify{}
 				ids.populateMessage(mes, rp, addReq.localConnAddr, addReq.remoteConnAddr)
 				ph = newPeerHandler(rp, ids, mes)
+				ph.start()
 				phs[rp] = ph
 				addReq.resp <- ph
 			}
@@ -226,19 +227,17 @@ func (ids *IDService) loop() {
 
 		case rp := <-phClosedCh:
 			ph := phs[rp]
-			delete(phs, rp)
 
 			// If we are connected to the peer, it means that we got a connection from the peer
 			// before we could finish removing it's handler on the previous disconnection.
-			// If we delete the handler and dont replace it, we wont be able to push updates to it
-			// till we see a new connection. So, create and register a new handler for it with the state
-			// initialised to the last message we sent to that peer.
+			// If we delete the handler, we wont be able to push updates to it
+			// till we see a new connection. So, we should restart the handler.
+			// The fact that we got the handler on this channel means that it's context and handler
+			// have completed because we write the handler to this chanel only after it closed.
 			if ids.Host.Network().Connectedness(rp) == network.Connected {
-				ph.msgMu.RLock()
-				mes := ph.idMsgSnapshot
-				ph.msgMu.RUnlock()
-				ph = nil
-				phs[rp] = newPeerHandler(rp, ids, mes)
+				ph.start()
+			} else {
+				delete(phs, rp)
 			}
 
 		case e, more := <-sub.Out():
