@@ -32,6 +32,7 @@ require (
 	github.com/libp2p/go-ws-transport v0.3.1
 	github.com/multiformats/go-multiaddr v0.2.1
 	github.com/multiformats/go-multiaddr-dns v0.2.0
+	github.com/multiformats/go-multiaddr-fmt v0.1.0
 	github.com/multiformats/go-multiaddr-net v0.1.4
 	github.com/multiformats/go-multistream v0.1.1
 	github.com/stretchr/testify v1.5.1
