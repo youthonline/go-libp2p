@@ -11,14 +11,21 @@ import (
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/protocol"
+	"github.com/libp2p/go-libp2p-core/record"
 
 	pb "github.com/libp2p/go-libp2p/p2p/protocol/identify/pb"
 
 	ggio "github.com/gogo/protobuf/io"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 var errProtocolNotSupported = errors.New("protocol not supported")
-var isTesting = false
+
+type identifySnapshot struct {
+	protocols []string
+	addrs     []ma.Multiaddr
+	record    *record.Envelope
+}
 
 type peerHandler struct {
 	ids *IDService
@@ -29,27 +36,22 @@ type peerHandler struct {
 
 	pid peer.ID
 
-	msgMu         sync.RWMutex
-	idMsgSnapshot *pb.Identify
+	snapshotMu sync.RWMutex
+	snapshot   *identifySnapshot
 
-	pushCh     chan struct{}
-	deltaCh    chan struct{}
-	evalTestCh chan func() // for testing
+	pushCh  chan struct{}
+	deltaCh chan struct{}
 }
 
-func newPeerHandler(pid peer.ID, ids *IDService, initState *pb.Identify) *peerHandler {
+func newPeerHandler(pid peer.ID, ids *IDService) *peerHandler {
 	ph := &peerHandler{
 		ids: ids,
 		pid: pid,
 
-		idMsgSnapshot: initState,
+		snapshot: ids.getSnapshot(),
 
 		pushCh:  make(chan struct{}, 1),
 		deltaCh: make(chan struct{}, 1),
-	}
-
-	if isTesting {
-		ph.evalTestCh = make(chan func())
 	}
 
 	return ph
@@ -87,9 +89,6 @@ func (ph *peerHandler) loop() {
 				log.Warnw("failed to send Identify Delta", "peer", ph.pid, "error", err)
 			}
 
-		case fnc := <-ph.evalTestCh:
-			fnc()
-
 		case <-ph.ctx.Done():
 			return
 		}
@@ -97,11 +96,6 @@ func (ph *peerHandler) loop() {
 }
 
 func (ph *peerHandler) sendDelta() error {
-	mes := ph.mkDelta()
-	if mes == nil || (len(mes.AddedProtocols) == 0 && len(mes.RmProtocols) == 0) {
-		return nil
-	}
-
 	// send a push if the peer does not support the Delta protocol.
 	if !ph.peerSupportsProtos([]string{IDDelta}) {
 		log.Debugw("will send push as peer does not support delta", "peer", ph.pid)
@@ -111,10 +105,11 @@ func (ph *peerHandler) sendDelta() error {
 		return nil
 	}
 
-	ph.msgMu.Lock()
-	// update our identify snapshot for this peer by applying the delta to it
-	ph.applyDelta(mes)
-	ph.msgMu.Unlock()
+	// extract a delta message, updating the last state.
+	mes := ph.nextDelta()
+	if mes == nil || (len(mes.AddedProtocols) == 0 && len(mes.RmProtocols) == 0) {
+		return nil
+	}
 
 	ds, err := ph.openStream([]string{IDDelta})
 	if err != nil {
@@ -139,31 +134,18 @@ func (ph *peerHandler) sendPush() error {
 
 	conn := dp.Conn()
 	mes := &pb.Identify{}
-	ph.ids.populateMessage(mes, ph.pid, conn.LocalMultiaddr(), conn.RemoteMultiaddr())
 
-	ph.msgMu.Lock()
-	ph.idMsgSnapshot = mes
-	ph.msgMu.Unlock()
+	snapshot := ph.ids.getSnapshot()
+	ph.snapshotMu.Lock()
+	ph.snapshot = snapshot
+	ph.snapshotMu.Unlock()
+
+	ph.ids.populateMessage(mes, conn, snapshot)
 
 	if err := ph.sendMessage(dp, mes); err != nil {
 		return fmt.Errorf("failed to send push message: %w", err)
 	}
 	return nil
-}
-
-func (ph *peerHandler) applyDelta(mes *pb.Delta) {
-	for _, p1 := range mes.RmProtocols {
-		for j, p2 := range ph.idMsgSnapshot.Protocols {
-			if p2 == p1 {
-				ph.idMsgSnapshot.Protocols[j] = ph.idMsgSnapshot.Protocols[len(ph.idMsgSnapshot.Protocols)-1]
-				ph.idMsgSnapshot.Protocols = ph.idMsgSnapshot.Protocols[:len(ph.idMsgSnapshot.Protocols)-1]
-			}
-		}
-	}
-
-	for _, p := range mes.AddedProtocols {
-		ph.idMsgSnapshot.Protocols = append(ph.idMsgSnapshot.Protocols, p)
-	}
 }
 
 func (ph *peerHandler) openStream(protos []string) (network.Stream, error) {
@@ -217,9 +199,17 @@ func (ph *peerHandler) peerSupportsProtos(protos []string) bool {
 	return true
 }
 
-func (ph *peerHandler) mkDelta() *pb.Delta {
-	old := ph.idMsgSnapshot.GetProtocols()
+func (ph *peerHandler) nextDelta() *pb.Delta {
 	curr := ph.ids.Host.Mux().Protocols()
+
+	// Extract the old protocol list and replace the old snapshot with an
+	// updated one.
+	ph.snapshotMu.Lock()
+	snapshot := *ph.snapshot
+	old := snapshot.protocols
+	snapshot.protocols = curr
+	ph.snapshot = &snapshot
+	ph.snapshotMu.Unlock()
 
 	oldProtos := make(map[string]struct{}, len(old))
 	currProtos := make(map[string]struct{}, len(curr))

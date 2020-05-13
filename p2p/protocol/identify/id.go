@@ -60,10 +60,8 @@ func init() {
 const transientTTL = 10 * time.Second
 
 type addPeerHandlerReq struct {
-	rp             peer.ID
-	localConnAddr  ma.Multiaddr
-	remoteConnAddr ma.Multiaddr
-	resp           chan *peerHandler
+	rp   peer.ID
+	resp chan *peerHandler
 }
 
 type rmPeerHandlerReq struct {
@@ -194,9 +192,7 @@ func (ids *IDService) loop() {
 			}
 
 			if ids.Host.Network().Connectedness(rp) == network.Connected {
-				mes := &pb.Identify{}
-				ids.populateMessage(mes, rp, addReq.localConnAddr, addReq.remoteConnAddr)
-				ph = newPeerHandler(rp, ids, mes)
+				ph = newPeerHandler(rp, ids)
 				ph.start()
 				phs[rp] = ph
 				addReq.resp <- ph
@@ -378,7 +374,7 @@ func (ids *IDService) sendIdentifyResp(s network.Stream) {
 	defer func() {
 		helpers.FullClose(s)
 		if ph != nil {
-			ph.msgMu.RUnlock()
+			ph.snapshotMu.RUnlock()
 		}
 	}()
 
@@ -386,8 +382,7 @@ func (ids *IDService) sendIdentifyResp(s network.Stream) {
 
 	phCh := make(chan *peerHandler, 1)
 	select {
-	case ids.addPeerHandlerCh <- addPeerHandlerReq{c.RemotePeer(), c.LocalMultiaddr(),
-		c.RemoteMultiaddr(), phCh}:
+	case ids.addPeerHandlerCh <- addPeerHandlerReq{c.RemotePeer(), phCh}:
 	case <-ids.ctx.Done():
 		return
 	}
@@ -398,9 +393,11 @@ func (ids *IDService) sendIdentifyResp(s network.Stream) {
 		return
 	}
 
-	ph.msgMu.RLock()
+	ph.snapshotMu.RLock()
+	mes := &pb.Identify{}
+	ids.populateMessage(mes, c, ph.snapshot)
 	w := ggio.NewDelimitedWriter(s)
-	w.WriteMsg(ph.idMsgSnapshot)
+	w.WriteMsg(mes)
 
 	log.Debugf("%s sent message to %s %s", ID, c.RemotePeer(), c.RemoteMultiaddr())
 }
@@ -422,13 +419,29 @@ func (ids *IDService) handleIdentifyResponse(s network.Stream) {
 	ids.consumeMessage(&mes, c)
 }
 
-func (ids *IDService) populateMessage(mes *pb.Identify, rp peer.ID, localAddr, remoteAddr ma.Multiaddr) {
-	// set protocols this node is currently handling
-	protos := ids.Host.Mux().Protocols()
-	mes.Protocols = make([]string, len(protos))
-	for i, p := range protos {
-		mes.Protocols[i] = p
+func (ids *IDService) getSnapshot() *identifySnapshot {
+	snapshot := new(identifySnapshot)
+	if cab, ok := peerstore.GetCertifiedAddrBook(ids.Host.Peerstore()); ok {
+		snapshot.record = cab.GetPeerRecord(ids.Host.ID())
+		if snapshot.record == nil {
+			log.Errorf("latest peer record does not exist. identify message incomplete!")
+		}
 	}
+	snapshot.addrs = ids.Host.Addrs()
+	snapshot.protocols = ids.Host.Mux().Protocols()
+	return snapshot
+}
+
+func (ids *IDService) populateMessage(
+	mes *pb.Identify,
+	conn network.Conn,
+	snapshot *identifySnapshot,
+) {
+	remoteAddr := conn.RemoteMultiaddr()
+	localAddr := conn.LocalMultiaddr()
+
+	// set protocols this node is currently handling
+	mes.Protocols = snapshot.protocols
 
 	// observed address so other side is informed of their
 	// "public" address, at least in relation to us.
@@ -436,33 +449,22 @@ func (ids *IDService) populateMessage(mes *pb.Identify, rp peer.ID, localAddr, r
 
 	// populate unsigned addresses.
 	// peers that do not yet support signed addresses will need this.
-	// set listen addrs, get our latest addrs from Host.
-	laddrs := ids.Host.Addrs()
 	// Note: LocalMultiaddr is sometimes 0.0.0.0
 	viaLoopback := manet.IsIPLoopback(localAddr) || manet.IsIPLoopback(remoteAddr)
-	mes.ListenAddrs = make([][]byte, 0, len(laddrs))
-	for _, addr := range laddrs {
+	mes.ListenAddrs = make([][]byte, 0, len(snapshot.addrs))
+	for _, addr := range snapshot.addrs {
 		if !viaLoopback && manet.IsIPLoopback(addr) {
 			continue
 		}
 		mes.ListenAddrs = append(mes.ListenAddrs, addr.Bytes())
 	}
 
-	// populate signed record.
-	cab, ok := peerstore.GetCertifiedAddrBook(ids.Host.Peerstore())
-	if ok {
-		rec := cab.GetPeerRecord(ids.Host.ID())
-		if rec == nil {
-			log.Errorf("latest peer record does not exist. identify message incomplete!")
-		} else {
-			recBytes, err := rec.Marshal()
-			if err != nil {
-				log.Errorf("error marshaling peer record: %v", err)
-			} else {
-				mes.SignedPeerRecord = recBytes
-				log.Debugf("%s sent peer record to %s", ids.Host.ID(), rp)
-			}
-		}
+	recBytes, err := snapshot.record.Marshal()
+	if err != nil {
+		log.Errorf("error marshaling peer record: %v", err)
+	} else {
+		mes.SignedPeerRecord = recBytes
+		log.Debugf("%s sent peer record to %s", ids.Host.ID(), conn.RemotePeer())
 	}
 
 	// set our public key

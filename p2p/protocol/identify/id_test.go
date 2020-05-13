@@ -490,8 +490,6 @@ func TestIdentifyDeltaOnProtocolChange(t *testing.T) {
 				lk.Unlock()
 			}
 		}
-
-		close(done)
 	}()
 
 	<-done
